@@ -1,0 +1,25 @@
+torch==2.5.1
+torchvision==0.20.1
+numpy==1.26.4
+pre-commit
+trimesh
+einops
+huggingface_hub
+imageio
+opencv-python
+# xformers
+open3d
+fastapi
+unicorn
+requests
+typer
+pillow
+omegaconf
+evo
+e3nn
+moviepy
+plyfile
+pillow_heif
+safetensors
+addict
+depth_anything_3

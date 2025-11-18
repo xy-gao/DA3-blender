@@ -1,0 +1,28 @@
+I am creating blender add on for Depth-Anything-3.
+I need you to implement the Depth-Anything-3 version of utils.py.
+provided is operators.py which imports utils.py, and also utils.py which I implemented previously for VGGT and Pi3.
+Depth-Anything-3 example inference is as below:
+---
+model = DepthAnything3()
+from safetensors.torch import load_file
+weight = load_file(MODEL_PATH)
+model.load_state_dict(weight, strict=False)
+model = model.to(device=device)
+example_path = "examples/SOH"
+images = sorted(glob.glob(os.path.join(example_path, "*.png")))
+prediction = model.inference(
+    images,
+)
+# prediction.processed_images : [N, H, W, 3] uint8   array
+print(prediction.processed_images.shape)
+# prediction.depth            : [N, H, W]    float32 array
+print(prediction.depth.shape)  
+# prediction.conf             : [N, H, W]    float32 array
+print(prediction.conf.shape)  
+# prediction.extrinsics       : [N, 3, 4]    float32 array # opencv w2c or colmap format
+print(prediction.extrinsics.shape)
+# prediction.intrinsics       : [N, 3, 3]    float32 array
+print(prediction.intrinsics.shape)
+---
+
+output Depth-Anything-3 version of utils.py.
