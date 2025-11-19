@@ -12,9 +12,11 @@ requirements_for_check_txt = add_on_path / 'requirements_for_check.txt'     # as
 DA3_DIR = add_on_path / "da3_repo"
 
 deps_path = add_on_path / 'deps_public'                 # might not exist until install_deps is called
+deps_path_da3 = add_on_path / 'deps_da3'
 # Append dependencies folder to system path so we can import
 # (important for Windows machines, but less so for Linux)
 sys.path.append(os.fspath(deps_path))
+sys.path.append(os.fspath(deps_path_da3))
 sys.path.append(os.fspath(DA3_DIR))
 
 class Dependencies:
@@ -43,7 +45,13 @@ class Dependencies:
             print(f'  Exception: {e}')
             print(f'  Folder: {deps_path}')
             return False
-
+        try:
+            deps_path_da3.mkdir(exist_ok=True)
+        except Exception as e:
+            print(f'Caught Exception while trying to create dependencies folder')
+            print(f'  Exception: {e}')
+            print(f'  Folder: {deps_path_da3}')
+            return False
         # Ensure pip is installed
         try:
             subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
@@ -85,7 +93,7 @@ class Dependencies:
                 "-e",
                 os.fspath(DA3_DIR),
                 "--target",
-                os.fspath(deps_path)
+                os.fspath(deps_path_da3)
             ]
             print(f'Installing: {cmd}')
             subprocess.check_call(cmd)
