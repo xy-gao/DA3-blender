@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 import torch
 import numpy as np
-from .utils import run_model, import_point_cloud
+from .utils import run_model, import_point_cloud, create_cameras
 
 add_on_path = Path(__file__).parent
 MODELS_DIR = os.path.join(add_on_path, 'models')

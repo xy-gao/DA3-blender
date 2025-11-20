@@ -15,9 +15,10 @@ deps_path = add_on_path / 'deps_public'                 # might not exist until 
 deps_path_da3 = add_on_path / 'deps_da3'
 # Append dependencies folder to system path so we can import
 # (important for Windows machines, but less so for Linux)
-sys.path.append(os.fspath(deps_path))
-sys.path.append(os.fspath(deps_path_da3))
-sys.path.append(os.fspath(DA3_DIR))
+sys.path.insert(0, os.fspath(deps_path))
+sys.path.insert(0, os.fspath(deps_path_da3))
+sys.path.insert(0, os.fspath(DA3_DIR))
+
 
 class Dependencies:
     # cache variables used to eliminate unnecessary computations
