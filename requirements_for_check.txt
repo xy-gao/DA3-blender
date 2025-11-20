@@ -22,4 +22,5 @@ plyfile
 pillow_heif
 safetensors
 addict
-# depth_anything_3
+pycolmap
+depth_anything_3
