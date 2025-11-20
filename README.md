@@ -11,6 +11,10 @@ This blender addon is based on [Depth-Anything-3](https://github.com/ByteDance-S
 3. Generate.
 
 
+
+https://github.com/user-attachments/assets/6eeff6d0-a89f-4c2c-970b-47fe2b5475d3
+
+
 ## Installation (only the first time)
 Current implementation download and use DA3-LARGE model (My GPU spec is not enough for DA3-GIANT). If you want to use other models, change this line of code in `operators.py`.
 ```python
