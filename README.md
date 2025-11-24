@@ -33,3 +33,5 @@ _URL = "https://huggingface.co/depth-anything/DA3-LARGE/resolve/main/model.safet
 - Blender 4.2
 - cuda 12.6
 
+also tested on Ubuntu 25.10, Blender 5.0, CUDA 13.0 https://github.com/xy-gao/DA3-blender/issues/1#issue-3652866452
+
