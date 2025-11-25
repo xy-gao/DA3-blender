@@ -16,16 +16,16 @@ https://github.com/user-attachments/assets/6eeff6d0-a89f-4c2c-970b-47fe2b5475d3
 
 
 ## Installation (only the first time)
-Current implementation download and use DA3-LARGE model (My GPU spec is not enough for DA3-GIANT). If you want to use other models, change this line of code in `operators.py`.
-```python
-_URL = "https://huggingface.co/depth-anything/DA3-LARGE/resolve/main/model.safetensors"
-```
 1. Download Zip from this github repo.
 2. Toggle System Console for installation logs tracking.
 3. Install addon in blender preference with "Install from Disk" and select downloaded zip.
 4. Wait for Depth-Anything-3 git clone and python dependencies installation.
 5. After addon activated, download Depth-Anything-3 model from operation panel.
 
+<img width="246" height="162" alt="517991309-15df7535-7177-4d9f-9a25-3dc3d6990ee4" src="https://github.com/user-attachments/assets/fd7233d9-ceb4-485c-8f36-5dfb35ef8b94" />
+
+
+<img width="246" height="138" alt="517991330-436125db-a8ee-4c7f-a84b-b5b18ad6ef86" src="https://github.com/user-attachments/assets/24d50d1e-4dd6-4584-8203-6f99115a60ab" />
 
 
 ## Tested on
