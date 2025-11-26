@@ -35,6 +35,7 @@ def run_model(target_dir, model):
     predictions['depth'] = prediction.depth
     predictions['extrinsic'] = prediction.extrinsics
     predictions['intrinsic'] = prediction.intrinsics
+    predictions['conf'] = prediction.conf
     print("Computing world points from depth map...")
     world_points = unproject_depth_map_to_point_map(predictions['depth'], predictions['extrinsic'], predictions['intrinsic'])
     predictions["world_points_from_depth"] = world_points
@@ -43,6 +44,7 @@ def run_model(target_dir, model):
 def import_point_cloud(d):
     points = d["world_points_from_depth"]
     images = d["images"]
+    conf = d["conf"]
     points_batch = points.reshape(-1, 3)
     reordered_points_batch = points_batch.copy()
     reordered_points_batch[:, [0, 1, 2]] = points_batch[:, [0, 2, 1]]
@@ -50,12 +52,16 @@ def import_point_cloud(d):
     points_batch = reordered_points_batch
     colors_batch = images.reshape(-1, 3)
     colors_batch = np.hstack((colors_batch, np.ones((colors_batch.shape[0], 1))))
+    conf_batch = conf.reshape(-1)
     mesh = bpy.data.meshes.new(name="Points")
     vertices = points_batch.tolist()
     mesh.from_pydata(vertices, [], [])
     attribute = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
     color_values = colors_batch.flatten().tolist()
     attribute.data.foreach_set("color", color_values)
+    attribute_conf = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
+    conf_values = conf_batch.tolist()
+    attribute_conf.data.foreach_set("value", conf_values)
     obj = bpy.data.objects.new("Points", mesh)
     bpy.context.collection.objects.link(obj)
     mat = bpy.data.materials.new(name="PointMaterial")
@@ -73,18 +79,32 @@ def import_point_cloud(d):
     geo_mod = obj.modifiers.new(name="GeometryNodes", type='NODES')
     node_group = bpy.data.node_groups.new(name="PointCloud", type='GeometryNodeTree')
     node_group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+    node_group.interface.new_socket(name="Threshold", in_out="INPUT", socket_type="NodeSocketFloat")
+    node_group.interface.items_tree[-1].default_value = 0.5
     node_group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
     geo_mod.node_group = node_group
     input_node = node_group.nodes.new('NodeGroupInput')
     output_node = node_group.nodes.new('NodeGroupOutput')
     mesh_to_points = node_group.nodes.new('GeometryNodeMeshToPoints')
     mesh_to_points.inputs['Radius'].default_value = 0.002
+    named_attr = node_group.nodes.new('GeometryNodeInputNamedAttribute')
+    named_attr.inputs['Name'].default_value = "conf"
+    named_attr.data_type = 'FLOAT'
+    compare = node_group.nodes.new('FunctionNodeCompare')
+    compare.data_type = 'FLOAT'
+    compare.operation = 'LESS_THAN'
+    delete_geo = node_group.nodes.new('GeometryNodeDeleteGeometry')
+    delete_geo.domain = 'POINT'
     set_material_node = node_group.nodes.new('GeometryNodeSetMaterial')
     set_material_node.inputs['Material'].default_value = mat
     node_group.links.new(input_node.outputs['Geometry'], mesh_to_points.inputs['Mesh'])
-    node_group.links.new(mesh_to_points.outputs['Points'], set_material_node.inputs['Geometry'])
+    node_group.links.new(mesh_to_points.outputs['Points'], delete_geo.inputs['Geometry'])
+    node_group.links.new(named_attr.outputs['Attribute'], compare.inputs['A'])
+    node_group.links.new(input_node.outputs['Threshold'], compare.inputs['B'])
+    node_group.links.new(compare.outputs['Result'], delete_geo.inputs['Selection'])
+    node_group.links.new(delete_geo.outputs['Geometry'], set_material_node.inputs['Geometry'])
     node_group.links.new(set_material_node.outputs['Geometry'], output_node.inputs['Geometry'])
-
+    
 def create_cameras(predictions, image_width=None, image_height=None):
     scene = bpy.context.scene
     if image_width is None or image_height is None:
