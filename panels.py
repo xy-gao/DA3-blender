@@ -25,5 +25,12 @@ class DA3Panel(bpy.types.Panel):
             row.operator("da3.download_model", text=f"Download {scene.da3_model_name}")
         
         layout.prop(scene, "da3_input_folder", text="Input Folder")
+
+        layout.prop(scene, "da3_batch_size", text="Batch Size")
+
         row = layout.row()
         row.operator("da3.generate_point_cloud")
+
+        # Progress bar
+        if context.scene.da3_progress > 0 and context.scene.da3_progress < 100:
+            layout.progress(factor=context.scene.da3_progress / 100.0)
