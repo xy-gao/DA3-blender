@@ -33,7 +33,7 @@ def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
         world_points[i] = world_points_i.reshape(H, W, 3)
     return world_points
 
-def run_single_model(target_dir, model, process_res=504, process_res_method="upper_bound_resize"):
+def run_single_model(target_dir, model, process_res=504, process_res_method="upper_bound_resize", use_half=False):
     print(f"Processing images from {target_dir}")
     image_paths = sorted(glob.glob(os.path.join(target_dir, "*.[jJpP][pPnN][gG]")))
     if not image_paths:
@@ -47,7 +47,10 @@ def run_single_model(target_dir, model, process_res=504, process_res_method="upp
         total_mb = total / 1024**2
         print(f"VRAM before inference: {allocated:.1f} MB (free: {free_mb:.1f} MB / {total_mb:.1f} MB)")
     import torch.cuda.amp as amp
-    with amp.autocast():
+    if use_half:
+        with amp.autocast():
+            prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method)
+    else:
         prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method)
     if torch.cuda.is_available():
         peak = torch.cuda.max_memory_allocated() / 1024**2

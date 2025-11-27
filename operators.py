@@ -144,6 +144,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         metric_mode = getattr(context.scene, "da3_metric_mode", "scale_base")
         process_res = context.scene.da3_process_res
         process_res_method = context.scene.da3_process_res_method
+        use_half_precision = context.scene.da3_use_half_precision
         
         if process_res % 14 != 0:
             self.report({'ERROR'}, "Process resolution must be a multiple of 14.")
@@ -159,7 +160,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         try:
             # 1) run base model
             base_model = get_model(base_model_name)
-            base_prediction, base_image_paths = run_single_model(input_folder, base_model, process_res, process_res_method)
+            base_prediction, base_image_paths = run_single_model(input_folder, base_model, process_res, process_res_method, use_half=use_half_precision)
 
             # 2) if metric enabled and weights available:
             if use_metric:
@@ -170,7 +171,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                     unload_current_model()
 
                     metric_model = get_model("da3metric-large")
-                    metric_prediction, metric_image_paths = run_single_model(input_folder, metric_model, process_res, process_res_method)
+                    metric_prediction, metric_image_paths = run_single_model(input_folder, metric_model, process_res, process_res_method, use_half=use_half_precision)
                     metric_model = None
                     unload_current_model()
 

@@ -69,6 +69,11 @@ def register():
             description="Method for resizing images to the target resolution",
             default="upper_bound_resize"
         )
+        bpy.types.Scene.da3_use_half_precision = bpy.props.BoolProperty(
+            name="Use Half Precision",
+            description="Use 16-bit floats for reduced VRAM usage",
+            default=False,
+        )
     else:
         raise ValueError("installation failed.")
 
@@ -85,6 +90,7 @@ def unregister():
         del bpy.types.Scene.da3_metric_mode
         del bpy.types.Scene.da3_process_res
         del bpy.types.Scene.da3_process_res_method
+        del bpy.types.Scene.da3_use_half_precision
 
 if __name__ == "__main__":
     register()
