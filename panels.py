@@ -28,6 +28,9 @@ class DA3Panel(bpy.types.Panel):
         if scene.da3_model_name != "da3nested-giant-large":
             layout.prop(scene, "da3_use_metric", text="Use Metric")
             if scene.da3_use_metric:
+                # Metric combination mode
+                layout.prop(scene, "da3_metric_mode", text="Metric Mode")
+
                 metric_model_name = "da3metric-large"
                 metric_model_path = get_model_path(metric_model_name)
                 row = layout.row()

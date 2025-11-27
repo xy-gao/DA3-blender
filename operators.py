@@ -7,6 +7,7 @@ from .utils import (
     run_single_model,
     convert_prediction_to_dict,
     combine_base_and_metric,
+    combine_base_with_metric_depth,
     import_point_cloud,
     create_cameras,
 )
@@ -106,6 +107,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         input_folder = context.scene.da3_input_folder
         base_model_name = context.scene.da3_model_name
         use_metric = context.scene.da3_use_metric
+        metric_mode = getattr(context.scene, "da3_metric_mode", "scale_base")
         
         if not input_folder or not os.path.isdir(input_folder):
             self.report({'ERROR'}, "Please select a valid input folder.")
@@ -125,9 +127,14 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                     metric_model = get_model("da3metric-large")
                     metric_prediction, metric_image_paths = run_single_model(input_folder, metric_model)
 
-                    combined_prediction = combine_base_and_metric(
-                        base_prediction, metric_prediction
-                    )
+                    if metric_mode == "metric_depth":
+                        combined_prediction = combine_base_with_metric_depth(
+                            base_prediction, metric_prediction
+                        )
+                    else:
+                        combined_prediction = combine_base_and_metric(
+                            base_prediction, metric_prediction
+                        )
                     combined_predictions = convert_prediction_to_dict(combined_prediction, base_image_paths)
                 else:
                     self.report({'WARNING'}, "Metric model not downloaded; using non-metric depth only.")

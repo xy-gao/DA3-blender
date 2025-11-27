@@ -207,6 +207,90 @@ def combine_base_and_metric(base, metric):
 
     return output
 
+
+def combine_base_with_metric_depth(base, metric):
+    """Combine base prediction cameras with raw metric model depth.
+
+    This variant keeps **base intrinsics/extrinsics/conf** but **replaces
+    depth with metric.depth in metres**, then applies the same sky-handling
+    logic as `combine_base_and_metric`.
+
+    Assumes shapes:
+      - base.depth:        [B, H, W]
+      - metric.depth:      [B, H, W]
+      - base.intrinsics:   [B, 3, 3]
+      - base.extrinsics:   [N, 3, 4] or [B, N, 4, 4]
+      - metric.sky:        [B, H, W]
+    """
+    output = base
+
+    def to_tensor(x):
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x)
+        return x
+
+    # Base / metric depths and sky mask
+    base_depth = to_tensor(output.depth).float()        # [B, H, W]
+    metric_depth = to_tensor(metric.depth).float()      # [B, H, W]
+    sky = to_tensor(metric.sky).float()                 # [B, H, W]
+
+    if base_depth.ndim != 3 or metric_depth.ndim != 3:
+        raise ValueError(
+            f"Unexpected depth shapes: base={base_depth.shape}, metric={metric_depth.shape}"
+        )
+
+    # Non-sky mask and basic sanity check
+    non_sky_mask = compute_sky_mask(sky, threshold=0.3)
+    if non_sky_mask.sum() <= 10:
+        raise ValueError("Insufficient non-sky pixels for metric depth sky handling")
+
+    # Compute global scale factor aligning base depth to metric depth
+    valid_base = base_depth[non_sky_mask]
+    valid_metric = metric_depth[non_sky_mask]
+    scale_factor = least_squares_scale_scalar(valid_metric, valid_base)
+
+    # Use metric depth as final depth (in metres)
+    depth = metric_depth
+
+    # Estimate a far depth for sky regions
+    non_sky_depth = depth[non_sky_mask]
+    if non_sky_depth.numel() > 100000:
+        idx = torch.randint(0, non_sky_depth.numel(), (100000,), device=non_sky_depth.device)
+        sampled_depth = non_sky_depth[idx]
+    else:
+        sampled_depth = non_sky_depth
+
+    non_sky_max = torch.quantile(sampled_depth, 0.99)
+    non_sky_max = torch.minimum(non_sky_max, torch.tensor(200.0, device=depth.device))
+
+    depth_4d = depth.unsqueeze(1)
+    dummy_conf = torch.ones_like(depth_4d)
+    depth_4d, _ = set_sky_regions_to_max_depth(
+        depth_4d, dummy_conf, non_sky_mask.unsqueeze(1), max_depth=non_sky_max
+    )
+    depth = depth_4d.squeeze(1)
+
+    # Scale base extrinsics translation so cameras match metric scale
+    extrinsics = to_tensor(output.extrinsics)
+    print("DEBUG combine_base_with_metric_depth: extrinsics shape:", extrinsics.shape)
+
+    if extrinsics.ndim == 3:
+        extrinsics = extrinsics.float()
+        extrinsics[:, :, 3] = extrinsics[:, :, 3] * scale_factor
+    elif extrinsics.ndim == 4:
+        extrinsics = extrinsics.float()
+        extrinsics[:, :, :3, 3] = extrinsics[:, :, :3, 3] * scale_factor
+    else:
+        raise ValueError(f"Unexpected extrinsics shape: {extrinsics.shape}")
+
+    # Write back into output: metric depth + scaled base cameras
+    output.depth = depth
+    output.extrinsics = extrinsics
+    output.is_metric = 1
+    output.scale_factor = float(scale_factor.item())
+
+    return output
+
 def import_point_cloud(d, collection=None):
     points = d["world_points_from_depth"]
     images = d["images"]

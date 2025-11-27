@@ -39,6 +39,15 @@ def register():
             description="Real-world scale using the metric DA3 model",
             default=False,
         )
+        bpy.types.Scene.da3_metric_mode = bpy.props.EnumProperty(
+            items=[
+                ("scale_base", "Scale Base Depth", "Scale base depth using metric model"),
+                ("metric_depth", "Use Metric Depth", "Use metric model depth with base cameras"),
+            ],
+            name="Metric Mode",
+            description="How to combine base and metric model outputs",
+            default="scale_base",
+        )
     else:
         raise ValueError("installation failed.")
 
@@ -51,6 +60,7 @@ def unregister():
         del bpy.types.Scene.da3_input_folder
         del bpy.types.Scene.da3_model_name
         del bpy.types.Scene.da3_use_metric
+        del bpy.types.Scene.da3_metric_mode
 
 if __name__ == "__main__":
     register()
