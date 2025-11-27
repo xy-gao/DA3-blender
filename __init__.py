@@ -27,10 +27,17 @@ def register():
                 ('da3-base', 'DA3 Base', 'Base model with balanced performance'),
                 ('da3-large', 'DA3 Large', 'Large model for better quality'),
                 ('da3-giant', 'DA3 Giant', 'Giant model for highest quality'),
+                ('da3mono-large', 'DA3 Mono Large', 'Single image depth estimation'),
+                ('da3nested-giant-large', 'DA3 Nested Giant Large', 'Nested depth estimation'),
             ],
             name="Model",
             description="Select DA3 model variant",
             default='da3-large'
+        )
+        bpy.types.Scene.da3_use_metric = bpy.props.BoolProperty(
+            name="Use Metric",
+            description="Real-world scale using the metric DA3 model",
+            default=False,
         )
     else:
         raise ValueError("installation failed.")
@@ -43,6 +50,7 @@ def unregister():
         bpy.utils.unregister_class(panels.DA3Panel)
         del bpy.types.Scene.da3_input_folder
         del bpy.types.Scene.da3_model_name
+        del bpy.types.Scene.da3_use_metric
 
 if __name__ == "__main__":
     register()

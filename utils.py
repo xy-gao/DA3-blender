@@ -4,6 +4,16 @@ import numpy as np
 import bpy
 from mathutils import Matrix
 import math
+import torch
+
+from depth_anything_3.utils.alignment import (
+    apply_metric_scaling,
+    compute_alignment_mask,
+    compute_sky_mask,
+    least_squares_scale_scalar,
+    sample_tensor_for_quantile,
+    set_sky_regions_to_max_depth,
+)
 
 def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
     N, H, W = depth.shape
@@ -23,25 +33,181 @@ def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
         world_points[i] = world_points_i.reshape(H, W, 3)
     return world_points
 
-def run_model(target_dir, model):
+def run_single_model(target_dir, model):
     print(f"Processing images from {target_dir}")
     image_paths = sorted(glob.glob(os.path.join(target_dir, "*.[jJpP][pPnN][gG]")))
     if not image_paths:
         raise ValueError("No images found in the target directory.")
     print(f"Found {len(image_paths)} images")
     prediction = model.inference(image_paths)
+    # DEBUG: inspect prediction object for this model
+    print("DEBUG prediction type:", type(prediction))
+    if hasattr(prediction, "__dict__"):
+        print("DEBUG prediction.__dict__ keys:", list(prediction.__dict__.keys()))
+    else:
+        print("DEBUG dir(prediction):", dir(prediction))
+    return prediction, image_paths
+
+def convert_prediction_to_dict(prediction, image_paths=None):
     predictions = {}
+
+    # images is already numpy in your current pipeline
     predictions['images'] = prediction.processed_images.astype(np.float32) / 255.0  # [N, H, W, 3]
-    predictions['depth'] = prediction.depth
-    predictions['extrinsic'] = prediction.extrinsics
-    predictions['intrinsic'] = prediction.intrinsics
+
+    # depth / extrinsics / intrinsics may be torch tensors after combination; ensure numpy
+    def to_numpy(x):
+        import torch
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().numpy()
+        return x
+
+    predictions['depth'] = to_numpy(prediction.depth)
+    predictions['extrinsic'] = to_numpy(prediction.extrinsics)
+    predictions['intrinsic'] = to_numpy(prediction.intrinsics)
     predictions['conf'] = prediction.conf
+
+    if image_paths is not None:
+        predictions['image_paths'] = image_paths
+    
+    print("DEBUG shapes:")
+    print("  images:", predictions['images'].shape)
+    print("  depth:", predictions['depth'].shape)
+    print("  extrinsic:", np.array(predictions['extrinsic']).shape)
+    print("  intrinsic:", np.array(predictions['intrinsic']).shape)
     print("Computing world points from depth map...")
-    world_points = unproject_depth_map_to_point_map(predictions['depth'], predictions['extrinsic'], predictions['intrinsic'])
+
+    if prediction.extrinsics is None or prediction.intrinsics is None:
+        raise ValueError("Prediction has no camera parameters; cannot create world-space point cloud.")
+
+    world_points = unproject_depth_map_to_point_map(
+        predictions['depth'],
+        predictions['extrinsic'],
+        predictions['intrinsic'],
+    )
     predictions["world_points_from_depth"] = world_points
     return predictions
 
-def import_point_cloud(d):
+# Based on da3_repo/src/depth_anything_3/model/da3.py, simplified for this addon
+def combine_base_and_metric(base, metric):
+    """
+    Combine a base DA3 prediction (with camera poses) and a metric DA3 prediction (no poses)
+    to produce a metric-scaled depth and adjusted extrinsics.
+
+    Assumes shapes:
+      - base.depth:        [B, H, W]
+      - metric.depth:      [B, H, W]
+      - base.intrinsics:   [B, 3, 3]
+      - base.extrinsics:   [N, 3, 4] or [B, N, 4, 4]
+      - metric.sky:        [B, H, W]
+    depth_conf is optional and ignored for scaling.
+    """
+    output = base  # work in-place on base prediction
+
+    # Pull relevant fields
+    depth = output.depth          # [B, H, W] (torch or numpy)
+    metric_depth = metric.depth   # [B, H, W]
+    intrinsics = output.intrinsics  # [B, 3, 3]
+    sky = metric.sky              # [B, H, W]
+
+    # Helper: numpy -> torch if needed
+    def to_tensor(x):
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x)
+        return x
+
+    depth = to_tensor(depth)
+    metric_depth = to_tensor(metric_depth)
+    intrinsics = to_tensor(intrinsics)
+    sky = to_tensor(sky)
+
+    # Ensure everything is float
+    depth = depth.float()
+    metric_depth = metric_depth.float()
+    intrinsics = intrinsics.float()
+    sky = sky.float()
+
+    # Add channel dim so depth/metric_depth become [B, 1, H, W]
+    if depth.ndim == 3:
+        depth_4d = depth.unsqueeze(1)
+    else:
+        raise ValueError(f"Unexpected depth shape: {depth.shape}")
+
+    if metric_depth.ndim == 3:
+        metric_4d = metric_depth.unsqueeze(1)
+    else:
+        raise ValueError(f"Unexpected metric_depth shape: {metric_depth.shape}")
+
+    # Metric scaling: intrinsics must be (B, N, 3, 3)
+    # Here N=1 (single view per batch entry), so we add that dim.
+    ixt = intrinsics  # [B, 3, 3]
+    if ixt.ndim == 3:
+        ixt_4d = ixt.unsqueeze(1)  # [B, 1, 3, 3]
+    else:
+        raise ValueError(f"Unexpected intrinsics shape: {intrinsics.shape}")
+
+    metric_4d = apply_metric_scaling(metric_4d, ixt_4d)  # [B, 1, H, W] (scaled metric depth)
+
+    # Back to [B, H, W]
+    depth = depth_4d.squeeze(1)
+    metric_depth = metric_4d.squeeze(1)
+
+    # Non-sky mask: [B, H, W]
+    non_sky_mask = compute_sky_mask(sky, threshold=0.3)
+    assert non_sky_mask.sum() > 10, "Insufficient non-sky pixels for alignment"
+
+    # Align using all non-sky pixels directly (no depth_conf / align_mask)
+    valid_depth = depth[non_sky_mask]           # 1D
+    valid_metric_depth = metric_depth[non_sky_mask]  # 1D
+
+    scale_factor = least_squares_scale_scalar(valid_metric_depth, valid_depth)
+
+    # Apply scale to depth
+    depth = depth * scale_factor
+
+    # Scale extrinsics translation
+    extrinsics = to_tensor(output.extrinsics)
+    print("DEBUG combine_base_and_metric: extrinsics shape:", extrinsics.shape)
+
+    if extrinsics.ndim == 3:
+        # [N, 3, 4]: scale translation column
+        extrinsics = extrinsics.float()
+        extrinsics[:, :, 3] = extrinsics[:, :, 3] * scale_factor
+    elif extrinsics.ndim == 4:
+        # [B, N, 4, 4]
+        extrinsics = extrinsics.float()
+        extrinsics[:, :, :3, 3] = extrinsics[:, :, :3, 3] * scale_factor
+    else:
+        raise ValueError(f"Unexpected extrinsics shape: {extrinsics.shape}")
+
+    # Optional: handle sky regions roughly like nested model (set sky to far depth)
+    non_sky_depth = depth[non_sky_mask]
+    if non_sky_depth.numel() > 100000:
+        idx = torch.randint(0, non_sky_depth.numel(), (100000,), device=non_sky_depth.device)
+        sampled_depth = non_sky_depth[idx]
+    else:
+        sampled_depth = non_sky_depth
+
+    non_sky_max = torch.quantile(sampled_depth, 0.99)
+    non_sky_max = torch.minimum(non_sky_max, torch.tensor(200.0, device=depth.device))
+
+    # We don't have depth_conf; use a dummy one and ignore it after
+    depth_4d = depth.unsqueeze(1)
+    dummy_conf = torch.ones_like(depth_4d)
+    depth_4d, _ = set_sky_regions_to_max_depth(
+        depth_4d, dummy_conf, non_sky_mask.unsqueeze(1), max_depth=non_sky_max
+    )
+    depth = depth_4d.squeeze(1)
+
+    # Write back into output prediction
+    output.depth = depth
+    output.extrinsics = extrinsics
+    output.is_metric = 1
+    # least_squares_scale_scalar returns a scalar tensor
+    output.scale_factor = float(scale_factor.item())
+
+    return output
+
+def import_point_cloud(d, collection=None):
     points = d["world_points_from_depth"]
     images = d["images"]
     conf = d["conf"]
@@ -63,7 +229,13 @@ def import_point_cloud(d):
     conf_values = conf_batch.tolist()
     attribute_conf.data.foreach_set("value", conf_values)
     obj = bpy.data.objects.new("Points", mesh)
-    bpy.context.collection.objects.link(obj)
+
+    # Link to the provided collection, or fallback to active collection
+    if collection is not None:
+        collection.objects.link(obj)
+    else:
+        bpy.context.collection.objects.link(obj)
+
     mat = bpy.data.materials.new(name="PointMaterial")
     mat.use_nodes = True
     nodes = mat.node_tree.nodes
@@ -105,7 +277,7 @@ def import_point_cloud(d):
     node_group.links.new(delete_geo.outputs['Geometry'], set_material_node.inputs['Geometry'])
     node_group.links.new(set_material_node.outputs['Geometry'], output_node.inputs['Geometry'])
     
-def create_cameras(predictions, image_width=None, image_height=None):
+def create_cameras(predictions, collection=None, image_width=None, image_height=None):
     scene = bpy.context.scene
     if image_width is None or image_height is None:
         H, W = predictions['images'].shape[1:3]
@@ -118,9 +290,21 @@ def create_cameras(predictions, image_width=None, image_height=None):
     num_cameras = len(predictions["extrinsic"])
     if len(predictions["intrinsic"]) != num_cameras:
         raise ValueError("Extrinsic and intrinsic lists must have the same length")
+
+    # Optional: get image paths from predictions, if available
+    image_paths = predictions.get("image_paths", None)
+
     T = np.diag([1.0, -1.0, -1.0, 1.0])
     for i in range(num_cameras):
-        cam_data = bpy.data.cameras.new(name=f"Camera_{i}")
+        # Name from image file if available
+        if image_paths and i < len(image_paths):
+            import os
+            base_name = os.path.splitext(os.path.basename(image_paths[i]))[0]
+            cam_name = base_name
+        else:
+            cam_name = f"Camera_{i}"
+
+        cam_data = bpy.data.cameras.new(name=cam_name)
         K = predictions["intrinsic"][i]
         f_x = K[0,0]
         c_x = K[0,2]
@@ -130,8 +314,13 @@ def create_cameras(predictions, image_width=None, image_height=None):
         cam_data.lens = (f_x / image_width) * sensor_width
         cam_data.shift_x = (c_x - image_width / 2.0) / image_width
         cam_data.shift_y = (c_y - image_height / 2.0) / image_height
-        cam_obj = bpy.data.objects.new(name=f"Camera_{i}", object_data=cam_data)
-        scene.collection.objects.link(cam_obj)
+        cam_obj = bpy.data.objects.new(name=cam_name, object_data=cam_data)
+
+        if collection is not None:
+            collection.objects.link(cam_obj)
+        else:
+            scene.collection.objects.link(cam_obj)
+        
         ext = predictions["extrinsic"][i]
         E = np.vstack((ext, [0, 0, 0, 1]))
         E_inv = np.linalg.inv(E)
