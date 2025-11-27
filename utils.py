@@ -5,10 +5,14 @@ import bpy
 from mathutils import Matrix
 import math
 
-def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
+def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics, progress_callback=None):
     N, H, W = depth.shape
     world_points = np.zeros((N, H, W, 3), dtype=np.float32)
     for i in range(N):
+        if progress_callback:
+            if progress_callback(i / N * 100):
+                return None
+
         u, v = np.meshgrid(np.arange(W), np.arange(H))
         pixels = np.stack([u, v, np.ones((H, W))], axis=-1).reshape(-1, 3)  # HW, 3
         invK = np.linalg.inv(intrinsics[i])
@@ -21,24 +25,77 @@ def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
         world_points_hom = (cam_to_world @ cam_points_hom.T).T  # HW, 4
         world_points_i = world_points_hom[:, :3] / world_points_hom[:, 3:4]
         world_points[i] = world_points_i.reshape(H, W, 3)
+
+    if progress_callback:
+        progress_callback(100)
+
     return world_points
 
-def run_model(target_dir, model):
+def run_model(target_dir, model, batch_size=1, progress_callback=None):
     print(f"Processing images from {target_dir}")
     image_paths = sorted(glob.glob(os.path.join(target_dir, "*.[jJpP][pPnN][gG]")))
     if not image_paths:
         raise ValueError("No images found in the target directory.")
     print(f"Found {len(image_paths)} images")
-    prediction = model.inference(image_paths)
+
     predictions = {}
-    predictions['images'] = prediction.processed_images.astype(np.float32) / 255.0  # [N, H, W, 3]
-    predictions['depth'] = prediction.depth
-    predictions['extrinsic'] = prediction.extrinsics
-    predictions['intrinsic'] = prediction.intrinsics
-    predictions['conf'] = prediction.conf
+
+    num_batches = int(np.ceil(len(image_paths) / batch_size))
+
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, len(image_paths))
+        batch_paths = image_paths[start_idx:end_idx]
+
+        cancelled = False
+        def model_progress_callback(step, total):
+            nonlocal cancelled
+            if progress_callback:
+                progress = (i * total + step) / (num_batches * total) * 50
+                if progress_callback(progress):
+                    cancelled = True
+                    return True
+            return False
+
+        prediction = model.inference(batch_paths, progress_callback=model_progress_callback)
+
+        if cancelled:
+            return None
+
+        if i == 0:
+            for key, value in prediction.__dict__.items():
+                if isinstance(value, np.ndarray):
+                    predictions[key] = value
+                else:
+                    predictions[key] = [value]
+        else:
+            for key, value in prediction.__dict__.items():
+                if isinstance(value, np.ndarray):
+                    predictions[key] = np.concatenate((predictions[key], value), axis=0)
+                else:
+                    predictions[key].append(value)
+
+    predictions['images'] = predictions.pop('processed_images').astype(np.float32) / 255.0
+
     print("Computing world points from depth map...")
-    world_points = unproject_depth_map_to_point_map(predictions['depth'], predictions['extrinsic'], predictions['intrinsic'])
+    def unproject_progress_callback(progress):
+        nonlocal cancelled
+        if progress_callback:
+            if progress_callback(50 + progress / 2):
+                cancelled = True
+                return True
+        return False
+
+    world_points = unproject_depth_map_to_point_map(predictions['depth'], predictions['extrinsic'], predictions['intrinsic'], unproject_progress_callback)
+
+    if cancelled:
+        return None
+
     predictions["world_points_from_depth"] = world_points
+
+    if progress_callback:
+        progress_callback(100)
+
     return predictions
 
 def import_point_cloud(d):
