@@ -33,13 +33,29 @@ def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
         world_points[i] = world_points_i.reshape(H, W, 3)
     return world_points
 
-def run_single_model(target_dir, model):
+def run_single_model(target_dir, model, process_res=504, process_res_method="upper_bound_resize"):
     print(f"Processing images from {target_dir}")
     image_paths = sorted(glob.glob(os.path.join(target_dir, "*.[jJpP][pPnN][gG]")))
     if not image_paths:
         raise ValueError("No images found in the target directory.")
     print(f"Found {len(image_paths)} images")
-    prediction = model.inference(image_paths)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+        allocated = torch.cuda.memory_allocated() / 1024**2
+        free, total = torch.cuda.mem_get_info()
+        free_mb = free / 1024**2
+        total_mb = total / 1024**2
+        print(f"VRAM before inference: {allocated:.1f} MB (free: {free_mb:.1f} MB / {total_mb:.1f} MB)")
+    import torch.cuda.amp as amp
+    with amp.autocast():
+        prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method)
+    if torch.cuda.is_available():
+        peak = torch.cuda.max_memory_allocated() / 1024**2
+        allocated = torch.cuda.memory_allocated() / 1024**2
+        free, total = torch.cuda.mem_get_info()
+        free_mb = free / 1024**2
+        total_mb = total / 1024**2
+        print(f"VRAM after inference: {allocated:.1f} MB (peak: {peak:.1f} MB, free: {free_mb:.1f} MB / {total_mb:.1f} MB)")
     # DEBUG: inspect prediction object for this model
     print("DEBUG prediction type:", type(prediction))
     if hasattr(prediction, "__dict__"):
@@ -58,7 +74,7 @@ def convert_prediction_to_dict(prediction, image_paths=None):
     def to_numpy(x):
         import torch
         if isinstance(x, torch.Tensor):
-            return x.detach().cpu().numpy()
+            return x.detach().cpu().float().numpy()  # Ensure float32
         return x
 
     predictions['depth'] = to_numpy(prediction.depth)

@@ -10,14 +10,20 @@ bl_info = {
 
 import bpy
 from .dependencies import Dependencies
-
+import os
 
 def register():
+    # Set PyTorch CUDA allocation config to reduce fragmentation
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+    # Set CUDA_LAUNCH_BLOCKING for better error reporting
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+    
     if not Dependencies.check():
         Dependencies.install()
     if Dependencies.check():
         from . import operators, panels
         bpy.utils.register_class(operators.DownloadModelOperator)
+        bpy.utils.register_class(operators.UnloadModelOperator)
         bpy.utils.register_class(operators.GeneratePointCloudOperator)
         bpy.utils.register_class(panels.DA3Panel)
         bpy.types.Scene.da3_input_folder = bpy.props.StringProperty(subtype='DIR_PATH')
@@ -48,6 +54,21 @@ def register():
             description="How to combine base and metric model outputs",
             default="scale_base",
         )
+        bpy.types.Scene.da3_process_res = bpy.props.IntProperty(
+            name="Process Resolution",
+            description="Internal resolution for processing (must be multiple of 14)",
+            default=504,
+            min=14
+        )
+        bpy.types.Scene.da3_process_res_method = bpy.props.EnumProperty(
+            items=[
+                ("upper_bound_resize", "Upper Bound Resize", "Resize so that the specified dimension becomes the longer side"),
+                ("lower_bound_resize", "Lower Bound Resize", "Resize so that the specified dimension becomes the shorter side"),
+            ],
+            name="Resize Method",
+            description="Method for resizing images to the target resolution",
+            default="upper_bound_resize"
+        )
     else:
         raise ValueError("installation failed.")
 
@@ -55,12 +76,15 @@ def unregister():
     if Dependencies.check():
         from . import operators, panels
         bpy.utils.unregister_class(operators.DownloadModelOperator)
+        bpy.utils.unregister_class(operators.UnloadModelOperator)
         bpy.utils.unregister_class(operators.GeneratePointCloudOperator)
         bpy.utils.unregister_class(panels.DA3Panel)
         del bpy.types.Scene.da3_input_folder
         del bpy.types.Scene.da3_model_name
         del bpy.types.Scene.da3_use_metric
         del bpy.types.Scene.da3_metric_mode
+        del bpy.types.Scene.da3_process_res
+        del bpy.types.Scene.da3_process_res_method
 
 if __name__ == "__main__":
     register()

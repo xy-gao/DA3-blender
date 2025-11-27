@@ -41,5 +41,9 @@ class DA3Panel(bpy.types.Panel):
                     op.da3_override_model_name = metric_model_name
 
         layout.prop(scene, "da3_input_folder", text="Input Folder")
+        layout.prop(scene, "da3_process_res", text="Process Resolution")
+        layout.prop(scene, "da3_process_res_method", text="Resize Method")
         row = layout.row()
         row.operator("da3.generate_point_cloud")
+        row = layout.row()
+        row.operator("da3.unload_model")

@@ -29,10 +29,26 @@ current_model_name = None
 def get_model_path(model_name):
     return os.path.join(MODELS_DIR, f'{model_name}.safetensors')
 
+def display_VRAM_usage(stage: str, include_peak=False):
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**2
+        free, total = torch.cuda.mem_get_info()
+        free_mb = free / 1024**2
+        total_mb = total / 1024**2
+        msg = f"VRAM {stage}: {allocated:.1f} MB (free: {free_mb:.1f} MB / {total_mb:.1f} MB)"
+        if include_peak:
+            peak = torch.cuda.max_memory_allocated() / 1024**2
+            msg += f" (peak: {peak:.1f} MB)"
+        print(msg)
+
+
 def get_model(model_name):
     global model, current_model_name
     if model is None or current_model_name != model_name:
         from depth_anything_3.api import DepthAnything3
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        display_VRAM_usage(f"before loading {model_name}")
         model = DepthAnything3(model_name=model_name)
         model_path = get_model_path(model_name)
         if os.path.exists(model_path):
@@ -43,19 +59,24 @@ def get_model(model_name):
             raise FileNotFoundError(f"Model file {model_name} not found. Please download it first.")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model.to(device)
+        if device == "cuda":
+            model.half()  # Use half precision to reduce VRAM usage
         model.eval()
         current_model_name = model_name
+        display_VRAM_usage(f"after loading {model_name}", include_peak=True)
     return model
 
 def unload_current_model():
     global model, current_model_name
     if model is not None:
+        display_VRAM_usage("before unload")
         # Drop references so PyTorch can free memory
         del model
         model = None
         current_model_name = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            display_VRAM_usage("after unload")
 
 class DownloadModelOperator(bpy.types.Operator):
     bl_idname = "da3.download_model"
@@ -99,6 +120,21 @@ class DownloadModelOperator(bpy.types.Operator):
         # return not os.path.exists(model_path)
 
 
+class UnloadModelOperator(bpy.types.Operator):
+    bl_idname = "da3.unload_model"
+    bl_label = "Unload Model"
+
+    def execute(self, context):
+        unload_current_model()
+        self.report({'INFO'}, "Model unloaded and VRAM freed.")
+        return {'FINISHED'}
+
+    @classmethod
+    def poll(cls, context):
+        # Enable if a model is loaded
+        return model is not None
+
+
 class GeneratePointCloudOperator(bpy.types.Operator):
     bl_idname = "da3.generate_point_cloud"
     bl_label = "Generate Point Cloud"
@@ -108,6 +144,16 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         base_model_name = context.scene.da3_model_name
         use_metric = context.scene.da3_use_metric
         metric_mode = getattr(context.scene, "da3_metric_mode", "scale_base")
+        process_res = context.scene.da3_process_res
+        process_res_method = context.scene.da3_process_res_method
+        
+        if process_res % 14 != 0:
+            self.report({'ERROR'}, "Process resolution must be a multiple of 14.")
+            return {'CANCELLED'}
+        
+        # Warn about potential timeout with high resolution
+        if process_res > 400:
+            self.report({'WARNING'}, "High process resolution may cause GPU timeout. Consider reducing to 350-392 for stability.")
         
         if not input_folder or not os.path.isdir(input_folder):
             self.report({'ERROR'}, "Please select a valid input folder.")
@@ -115,17 +161,20 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         try:
             # 1) run base model
             base_model = get_model(base_model_name)
-            base_prediction, base_image_paths = run_single_model(input_folder, base_model)
+            base_prediction, base_image_paths = run_single_model(input_folder, base_model, process_res, process_res_method)
 
             # 2) if metric enabled and weights available:
             if use_metric:
                 metric_path = get_model_path("da3metric-large")
                 if os.path.exists(metric_path):
                     # free base model from VRAM before loading metric
+                    base_model = None
                     unload_current_model()
 
                     metric_model = get_model("da3metric-large")
-                    metric_prediction, metric_image_paths = run_single_model(input_folder, metric_model)
+                    metric_prediction, metric_image_paths = run_single_model(input_folder, metric_model, process_res, process_res_method)
+                    metric_model = None
+                    unload_current_model()
 
                     if metric_mode == "metric_depth":
                         combined_prediction = combine_base_with_metric_depth(
@@ -158,6 +207,20 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             import traceback
             print("DA3 ERROR while generating point cloud:")
             traceback.print_exc()
+            base_model = None
+            metric_model = None
+            base_prediction = None
+            metric_prediction = None
+            combined_prediction = None
+            combined_predictions = None
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()  # Force free any pending allocations
+                except Exception as e:
+                    print(f"Warning: Failed to empty CUDA cache: {e}")
+            import gc
+            gc.collect()  # Force garbage collection
+            unload_current_model()  # Free VRAM on error
             self.report({'ERROR'}, f"Failed to generate point cloud: {e}")
             return {'CANCELLED'}
         return {'FINISHED'}
