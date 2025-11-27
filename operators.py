@@ -59,8 +59,6 @@ def get_model(model_name):
             raise FileNotFoundError(f"Model file {model_name} not found. Please download it first.")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model.to(device)
-        if device == "cuda":
-            model.half()  # Use half precision to reduce VRAM usage
         model.eval()
         current_model_name = model_name
         display_VRAM_usage(f"after loading {model_name}", include_peak=True)
