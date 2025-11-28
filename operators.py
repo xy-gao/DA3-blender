@@ -172,6 +172,8 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             wm.progress_end()
             return {'CANCELLED'}
         
+        print(f"Total images: {len(image_paths)}")
+        
         batch_mode = context.scene.da3_batch_mode
         batch_size = context.scene.da3_batch_size
         if batch_mode == "skip_frames" and len(image_paths) > batch_size:
@@ -198,7 +200,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
                     end_idx = min(start_idx + batch_size, len(image_paths))
                     batch_paths = image_paths[start_idx:end_idx]
-                    self.report({'INFO'}, f"Processing batch {batch_idx + 1}/{num_batches} ({len(batch_paths)} images)...")
+                    print(f"Batch {batch_idx + 1}/{num_batches}:")
                     prediction, _ = run_single_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
                     all_base_predictions.append((prediction, start_idx))
                 base_prediction = combine_overlapping_predictions(all_base_predictions, image_paths)
@@ -230,6 +232,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
                             end_idx = min(start_idx + batch_size, len(image_paths))
                             batch_paths = image_paths[start_idx:end_idx]
+                            print(f"Batch {batch_idx + 1}/{num_batches}:")
                             prediction, _ = run_single_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
                             all_metric_predictions.append((prediction, start_idx))
                         metric_prediction = combine_overlapping_predictions(all_metric_predictions, image_paths)

@@ -81,15 +81,15 @@ def combine_overlapping_predictions(all_predictions, full_image_paths):
     for i, (prediction, start_idx) in enumerate(all_predictions):
         pred_dict = convert_prediction_to_dict(prediction, full_image_paths[start_idx:start_idx+len(prediction.extrinsics)])
         
-        images = pred_dict['images']
+        images_raw = np.asarray(prediction.processed_images).astype(np.float32)  # Raw 0-255, ensure numpy
         depths = pred_dict['depth']
-        extrinsics = pred_dict['extrinsic']
+        extrinsics = pred_dict['extrinsic']  # List of 3x4
         intrinsics = pred_dict['intrinsic']
         confs = pred_dict['conf']
         
         if i == 0:
             # First batch, use as is
-            all_images.append(images)
+            all_images.append(images_raw)
             all_depths.append(depths)
             all_extrinsics.extend(extrinsics)
             all_intrinsics.extend(intrinsics)
@@ -98,26 +98,44 @@ def combine_overlapping_predictions(all_predictions, full_image_paths):
             prev_overlap_idx = len(extrinsics) - 1  # Last frame of this batch
         else:
             # Subsequent batches, adjust extrinsics
-            # Overlap frame is the first in this batch, which is start_idx in full list
-            # In previous batch, it was the last
-            overlap_current = extrinsics[0]  # 4x4 matrix
-            overlap_prev = prev_extrinsics[prev_overlap_idx]  # 4x4 matrix
+            # Overlap frame is the first in this batch
+            overlap_current_3x4 = extrinsics[0]
+            overlap_prev_3x4 = prev_extrinsics[prev_overlap_idx]
+            
+            # Convert to 4x4
+            def extrinsic_to_4x4(ext_3x4):
+                R = ext_3x4[:, :3]
+                t = ext_3x4[:, 3]
+                T = np.eye(4)
+                T[:3, :3] = R
+                T[:3, 3] = t
+                return T
+            
+            def extrinsic_inv_4x4(T_4x4):
+                R = T_4x4[:3, :3]
+                t = T_4x4[:3, 3]
+                T_inv = np.eye(4)
+                T_inv[:3, :3] = R.T
+                T_inv[:3, 3] = -R.T @ t
+                return T_inv
+            
+            overlap_current_4x4 = extrinsic_to_4x4(overlap_current_3x4)
+            overlap_prev_4x4 = extrinsic_to_4x4(overlap_prev_3x4)
             
             # Transform to align: current poses relative to prev's overlap
-            # transform = overlap_prev @ inv(overlap_current)
-            import numpy as np
-            transform = np.dot(overlap_prev, np.linalg.inv(overlap_current))
+            transform = np.dot(overlap_prev_4x4, extrinsic_inv_4x4(overlap_current_4x4))
             
             # Apply transform to all extrinsics in this batch
             adjusted_extrinsics = []
-            for ext in extrinsics:
-                adjusted_ext = np.dot(transform, ext)
-                adjusted_extrinsics.append(adjusted_ext)
+            for ext_3x4 in extrinsics:
+                ext_4x4 = extrinsic_to_4x4(ext_3x4)
+                adjusted_4x4 = np.dot(transform, ext_4x4)
+                # Back to 3x4
+                adjusted_3x4 = np.hstack([adjusted_4x4[:3, :3], adjusted_4x4[:3, 3:4]])
+                adjusted_extrinsics.append(adjusted_3x4)
             
-            # Skip the first (overlap) for all except extrinsics? No, since overlap is included, but to avoid duplicate, perhaps skip first for all
-            # But since it's overlap, and we want all unique, but for simplicity, since batches overlap by 1, and we adjust, but to combine, we need to include all, but avoid duplicates.
-            # Actually, for the final result, we want all unique frames, so for batches >0, start from index 1
-            all_images.append(images[1:])
+            # Skip the first (overlap) for all
+            all_images.append(images_raw[1:])
             all_depths.append(depths[1:])
             all_extrinsics.extend(adjusted_extrinsics[1:])
             all_intrinsics.extend(intrinsics[1:])
@@ -131,8 +149,8 @@ def combine_overlapping_predictions(all_predictions, full_image_paths):
     combined = type('CombinedPrediction', (), {})()
     combined.processed_images = np.concatenate(all_images, axis=0)
     combined.depth = np.concatenate(all_depths, axis=0)
-    combined.extrinsic = all_extrinsics
-    combined.intrinsic = all_intrinsics
+    combined.extrinsics = all_extrinsics  # Note: plural, as in original
+    combined.intrinsics = all_intrinsics
     combined.conf = np.concatenate(all_confs, axis=0)
     
     return combined
