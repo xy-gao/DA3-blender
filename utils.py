@@ -125,6 +125,10 @@ def combine_overlapping_predictions(all_predictions, full_image_paths):
             # Transform to align: current poses relative to prev's overlap
             transform = np.dot(overlap_prev_4x4, extrinsic_inv_4x4(overlap_current_4x4))
             
+            print(f"Overlap prev t: {overlap_prev_3x4[3]}")
+            print(f"Overlap current t: {overlap_current_3x4[3]}")
+            print(f"Transform:\n{transform}")
+            
             # Apply transform to all extrinsics in this batch
             adjusted_extrinsics = []
             for ext_3x4 in extrinsics:
@@ -133,6 +137,9 @@ def combine_overlapping_predictions(all_predictions, full_image_paths):
                 # Back to 3x4
                 adjusted_3x4 = np.hstack([adjusted_4x4[:3, :3], adjusted_4x4[:3, 3:4]])
                 adjusted_extrinsics.append(adjusted_3x4)
+            
+            print(f"Adjusted overlap t: {adjusted_extrinsics[0][3]}")
+            print(f"Should match prev t: {np.allclose(adjusted_extrinsics[0][3], overlap_prev_3x4[3])}")
             
             # Skip the first (overlap) for all
             all_images.append(images_raw[1:])
