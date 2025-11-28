@@ -85,6 +85,7 @@ def register():
                 ("ignore_batch_size", "Ignore Batch Size", "Process all images (may use excessive VRAM)"),
                 ("skip_frames", "Skip Frames", "Process evenly spaced frames"),
                 ("last_frame_overlap", "Last Frame Overlap", "Process overlapping batches for large datasets"),
+                ("first_last_overlap", "First+Last Overlap", "Use first and last frame of previous batch plus new frames"),
             ],
             name="Batch Mode",
             description="How to select images for processing",

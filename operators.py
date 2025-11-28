@@ -180,7 +180,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             import numpy as np
             indices = np.linspace(0, len(image_paths) - 1, batch_size, dtype=int)
             image_paths = [image_paths[i] for i in indices]
-        # For last_frame_overlap and ignore_batch_size, use all images
+        # For overlap modes and ignore_batch_size, use all images
         
         self.report({'INFO'}, f"Processing {len(image_paths)} images...")
         
@@ -192,17 +192,61 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             wm.progress_update(15)
             self.report({'INFO'}, "Running base model inference...")
             
-            if batch_mode == "last_frame_overlap":
+            if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
                 # Process in overlapping batches
                 all_base_predictions = []
-                step = batch_size - 1
-                num_batches = (len(image_paths) + step - 1) // step  # Ceiling division
-                for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
-                    end_idx = min(start_idx + batch_size, len(image_paths))
-                    batch_paths = image_paths[start_idx:end_idx]
-                    print(f"Batch {batch_idx + 1}/{num_batches}:")
-                    prediction, _ = run_single_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
-                    all_base_predictions.append((prediction, start_idx))
+
+                if batch_mode == "last_frame_overlap":
+                    # Existing scheme: last frame of previous batch overlaps with first of next
+                    step = batch_size - 1
+                    num_batches = (len(image_paths) + step - 1) // step  # Ceiling division
+                    for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
+                        end_idx = min(start_idx + batch_size, len(image_paths))
+                        batch_paths = image_paths[start_idx:end_idx]
+                        batch_indices = list(range(start_idx, end_idx))
+                        print(f"Batch {batch_idx + 1}/{num_batches}:")
+                        prediction, _ = run_single_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+                        all_base_predictions.append((prediction, batch_indices))
+                else:
+                    # New scheme: [prev_first_new, prev_last_new] + N new frames
+                    N = len(image_paths)
+                    if batch_size < 3:
+                        step = 1
+                    else:
+                        step = batch_size - 2
+
+                    # First batch: just the first batch_size frames
+                    start = 0
+                    end = min(batch_size, N)
+                    batch_indices = list(range(start, end))
+                    num_batches = 1
+                    remaining_start = end
+                    # Rough upper bound for logging
+                    if step > 0:
+                        num_batches = 1 + max(0, (N - end + step - 1) // step)
+
+                    batch_idx = 0
+                    while True:
+                        # Build batch paths from indices
+                        batch_paths = [image_paths[i] for i in batch_indices]
+                        print(f"Batch {batch_idx + 1}/{num_batches}:")
+                        prediction, _ = run_single_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+                        all_base_predictions.append((prediction, batch_indices.copy()))
+
+                        if remaining_start >= N:
+                            break
+
+                        # Define new first/last from current batch (its first and last new frames)
+                        first_new = batch_indices[0]
+                        last_new = batch_indices[-1]
+
+                        # Next batch indices: [first_new, last_new] + next unseen indices
+                        next_indices = list(range(remaining_start, min(remaining_start + step, N)))
+                        batch_indices = [first_new, last_new] + next_indices
+
+                        remaining_start += len(next_indices)
+                        batch_idx += 1
+
                 base_prediction = combine_overlapping_predictions(all_base_predictions, image_paths)
                 base_image_paths = image_paths
             else:
@@ -224,17 +268,53 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                     wm.progress_update(75)
                     self.report({'INFO'}, "Running metric model inference...")
                     
-                    if batch_mode == "last_frame_overlap":
-                        # Process in overlapping batches for metric too
+                    if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+                        # Process in overlapping batches for metric too (mirror base logic)
                         all_metric_predictions = []
-                        step = batch_size - 1
-                        num_batches = (len(image_paths) + step - 1) // step
-                        for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
-                            end_idx = min(start_idx + batch_size, len(image_paths))
-                            batch_paths = image_paths[start_idx:end_idx]
-                            print(f"Batch {batch_idx + 1}/{num_batches}:")
-                            prediction, _ = run_single_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
-                            all_metric_predictions.append((prediction, start_idx))
+
+                        if batch_mode == "last_frame_overlap":
+                            step = batch_size - 1
+                            num_batches = (len(image_paths) + step - 1) // step
+                            for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
+                                end_idx = min(start_idx + batch_size, len(image_paths))
+                                batch_paths = image_paths[start_idx:end_idx]
+                                batch_indices = list(range(start_idx, end_idx))
+                                print(f"Batch {batch_idx + 1}/{num_batches}:")
+                                prediction, _ = run_single_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                                all_metric_predictions.append((prediction, batch_indices))
+                        else:
+                            N = len(image_paths)
+                            if batch_size < 3:
+                                step = 1
+                            else:
+                                step = batch_size - 2
+
+                            start = 0
+                            end = min(batch_size, N)
+                            batch_indices = list(range(start, end))
+                            num_batches = 1
+                            remaining_start = end
+                            if step > 0:
+                                num_batches = 1 + max(0, (N - end + step - 1) // step)
+
+                            batch_idx = 0
+                            while True:
+                                batch_paths = [image_paths[i] for i in batch_indices]
+                                print(f"Batch {batch_idx + 1}/{num_batches}:")
+                                prediction, _ = run_single_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                                all_metric_predictions.append((prediction, batch_indices.copy()))
+
+                                if remaining_start >= N:
+                                    break
+
+                                first_new = batch_indices[0]
+                                last_new = batch_indices[-1]
+                                next_indices = list(range(remaining_start, min(remaining_start + step, N)))
+                                batch_indices = [first_new, last_new] + next_indices
+
+                                remaining_start += len(next_indices)
+                                batch_idx += 1
+
                         metric_prediction = combine_overlapping_predictions(all_metric_predictions, image_paths)
                         metric_image_paths = image_paths
                     else:

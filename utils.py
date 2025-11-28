@@ -66,20 +66,23 @@ def run_single_model(image_paths, model, process_res=504, process_res_method="up
 def combine_overlapping_predictions(all_predictions, full_image_paths):
     if not all_predictions:
         raise ValueError("No predictions to combine")
-    
-    # Assume all_predictions is list of (prediction, start_idx)
-    # First, collect all data
+
+    # all_predictions: list of (prediction, index_list) where index_list holds
+    # the global frame indices used for that batch. First batch is contiguous;
+    # later batches include overlap frames plus new frames.
     all_images = []
     all_depths = []
     all_extrinsics = []
     all_intrinsics = []
     all_confs = []
-    
+
     prev_extrinsics = None
     prev_overlap_idx = None
-    
-    for i, (prediction, start_idx) in enumerate(all_predictions):
-        pred_dict = convert_prediction_to_dict(prediction, full_image_paths[start_idx:start_idx+len(prediction.extrinsics)])
+
+    for i, (prediction, index_list) in enumerate(all_predictions):
+        # Map batch indices back to image_paths just for logging/consistency
+        batch_paths = [full_image_paths[j] for j in index_list]
+        pred_dict = convert_prediction_to_dict(prediction, batch_paths)
         
         images_raw = np.asarray(prediction.processed_images).astype(np.float32)  # Raw 0-255, ensure numpy
         depths = pred_dict['depth']
