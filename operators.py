@@ -163,6 +163,23 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         wm.progress_begin(0, 100)
         self.report({'INFO'}, "Starting point cloud generation...")
         
+        # Get image paths
+        import glob
+        image_paths = sorted(glob.glob(os.path.join(input_folder, "*.[jJpP][pPnN][gG]")))
+        if not image_paths:
+            self.report({'ERROR'}, "No images found in the input folder.")
+            wm.progress_end()
+            return {'CANCELLED'}
+        
+        batch_mode = context.scene.da3_batch_mode
+        batch_size = context.scene.da3_batch_size
+        if batch_mode == "skip_frames" and len(image_paths) > batch_size:
+            import numpy as np
+            indices = np.linspace(0, len(image_paths) - 1, batch_size, dtype=int)
+            image_paths = [image_paths[i] for i in indices]
+        
+        self.report({'INFO'}, f"Processing {len(image_paths)} images...")
+        
         try:
             # 1) run base model
             wm.progress_update(5)
@@ -170,7 +187,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             base_model = get_model(base_model_name)
             wm.progress_update(15)
             self.report({'INFO'}, "Running base model inference...")
-            base_prediction, base_image_paths = run_single_model(input_folder, base_model, process_res, process_res_method, use_half=use_half_precision)
+            base_prediction, base_image_paths = run_single_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
             wm.progress_update(60)
 
             # 2) if metric enabled and weights available:
@@ -186,7 +203,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                     metric_model = get_model("da3metric-large")
                     wm.progress_update(75)
                     self.report({'INFO'}, "Running metric model inference...")
-                    metric_prediction, metric_image_paths = run_single_model(input_folder, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                    metric_prediction, metric_image_paths = run_single_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
                     wm.progress_update(90)
                     metric_model = None
                     unload_current_model()

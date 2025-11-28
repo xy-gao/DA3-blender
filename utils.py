@@ -33,12 +33,8 @@ def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
         world_points[i] = world_points_i.reshape(H, W, 3)
     return world_points
 
-def run_single_model(target_dir, model, process_res=504, process_res_method="upper_bound_resize", use_half=False):
-    print(f"Processing images from {target_dir}")
-    image_paths = sorted(glob.glob(os.path.join(target_dir, "*.[jJpP][pPnN][gG]")))
-    if not image_paths:
-        raise ValueError("No images found in the target directory.")
-    print(f"Found {len(image_paths)} images")
+def run_single_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False):
+    print(f"Processing {len(image_paths)} images")
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         allocated = torch.cuda.memory_allocated() / 1024**2

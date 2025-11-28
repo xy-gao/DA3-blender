@@ -74,6 +74,21 @@ def register():
             description="Use 16-bit floats for reduced VRAM usage",
             default=False,
         )
+        bpy.types.Scene.da3_batch_size = bpy.props.IntProperty(
+            name="Batch Size",
+            description="Number of images to process in batch mode",
+            default=10,
+            min=1
+        )
+        bpy.types.Scene.da3_batch_mode = bpy.props.EnumProperty(
+            items=[
+                ("ignore_batch_size", "Ignore Batch Size", "Process all images (may use excessive VRAM)"),
+                ("skip_frames", "Skip Frames", "Process evenly spaced frames"),
+            ],
+            name="Batch Mode",
+            description="How to select images for processing",
+            default="skip_frames"
+        )
     else:
         raise ValueError("installation failed.")
 
@@ -91,6 +106,8 @@ def unregister():
         del bpy.types.Scene.da3_process_res
         del bpy.types.Scene.da3_process_res_method
         del bpy.types.Scene.da3_use_half_precision
+        del bpy.types.Scene.da3_batch_size
+        del bpy.types.Scene.da3_batch_mode
 
 if __name__ == "__main__":
     register()
