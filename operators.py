@@ -157,21 +157,37 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         if not input_folder or not os.path.isdir(input_folder):
             self.report({'ERROR'}, "Please select a valid input folder.")
             return {'CANCELLED'}
+        
+        # Initialize progress bar
+        wm = bpy.context.window_manager
+        wm.progress_begin(0, 100)
+        self.report({'INFO'}, "Starting point cloud generation...")
+        
         try:
             # 1) run base model
+            wm.progress_update(5)
+            self.report({'INFO'}, f"Loading {base_model_name} model...")
             base_model = get_model(base_model_name)
+            wm.progress_update(15)
+            self.report({'INFO'}, "Running base model inference...")
             base_prediction, base_image_paths = run_single_model(input_folder, base_model, process_res, process_res_method, use_half=use_half_precision)
+            wm.progress_update(60)
 
             # 2) if metric enabled and weights available:
             if use_metric:
                 metric_path = get_model_path("da3metric-large")
                 if os.path.exists(metric_path):
                     # free base model from VRAM before loading metric
+                    wm.progress_update(65)
+                    self.report({'INFO'}, "Unloading base model and loading metric model...")
                     base_model = None
                     unload_current_model()
 
                     metric_model = get_model("da3metric-large")
+                    wm.progress_update(75)
+                    self.report({'INFO'}, "Running metric model inference...")
                     metric_prediction, metric_image_paths = run_single_model(input_folder, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                    wm.progress_update(90)
                     metric_model = None
                     unload_current_model()
 
@@ -202,7 +218,12 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             self.report({'INFO'}, "Point cloud generated and imported successfully.")
             create_cameras(combined_predictions, collection=target_col)
             self.report({'INFO'}, "Cameras generated successfully.")
+            
+            wm.progress_update(100)
+            wm.progress_end()
+            self.report({'INFO'}, "Point cloud generation complete.")
         except Exception as e:
+            wm.progress_end()
             import traceback
             print("DA3 ERROR while generating point cloud:")
             traceback.print_exc()
