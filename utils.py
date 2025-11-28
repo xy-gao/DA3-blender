@@ -102,44 +102,43 @@ def combine_overlapping_predictions(all_predictions, full_image_paths):
             overlap_current_3x4 = extrinsics[0]
             overlap_prev_3x4 = prev_extrinsics[prev_overlap_idx]
             
-            # Convert to 4x4
+            # Convert world-to-camera extrinsics (3x4) to 4x4
             def extrinsic_to_4x4(ext_3x4):
                 R = ext_3x4[:, :3]
                 t = ext_3x4[:, 3]
-                T = np.eye(4)
+                T = np.eye(4, dtype=np.float32)
                 T[:3, :3] = R
                 T[:3, 3] = t
                 return T
-            
-            def extrinsic_inv_4x4(T_4x4):
+
+            # Invert a 4x4 rigid transform
+            def invert_4x4(T_4x4):
                 R = T_4x4[:3, :3]
                 t = T_4x4[:3, 3]
-                T_inv = np.eye(4)
+                T_inv = np.eye(4, dtype=np.float32)
                 T_inv[:3, :3] = R.T
                 T_inv[:3, 3] = -R.T @ t
                 return T_inv
-            
-            overlap_current_4x4 = extrinsic_to_4x4(overlap_current_3x4)
-            overlap_prev_4x4 = extrinsic_to_4x4(overlap_prev_3x4)
-            
-            # Transform to align: current poses relative to prev's overlap
-            transform = np.dot(overlap_prev_4x4, extrinsic_inv_4x4(overlap_current_4x4))
-            
-            print(f"Overlap prev t: {overlap_prev_3x4[3]}")
-            print(f"Overlap current t: {overlap_current_3x4[3]}")
-            print(f"Transform:\n{transform}")
-            
-            # Apply transform to all extrinsics in this batch
+
+            # Work in camera-to-world space for alignment
+            Ec_curr = extrinsic_to_4x4(overlap_current_3x4)   # world->cam (current overlap)
+            Ec_prev = extrinsic_to_4x4(overlap_prev_3x4)      # world->cam (prev overlap)
+            Cc_curr = invert_4x4(Ec_curr)  # cam->world
+            Cc_prev = invert_4x4(Ec_prev)  # cam->world
+
+            # Transform that maps current cameras into previous world frame
+            # C_prev ≈ T @ C_curr  =>  T = C_prev @ inv(C_curr)
+            T_align = Cc_prev @ invert_4x4(Cc_curr)
+
+            # Apply transform in cam->world space, then convert back to world->cam extrinsics
             adjusted_extrinsics = []
             for ext_3x4 in extrinsics:
-                ext_4x4 = extrinsic_to_4x4(ext_3x4)
-                adjusted_4x4 = np.dot(transform, ext_4x4)
-                # Back to 3x4
-                adjusted_3x4 = np.hstack([adjusted_4x4[:3, :3], adjusted_4x4[:3, 3:4]])
+                Ec = extrinsic_to_4x4(ext_3x4)   # world->cam
+                Cc = invert_4x4(Ec)              # cam->world
+                Cc_aligned = T_align @ Cc
+                Ec_aligned = invert_4x4(Cc_aligned)
+                adjusted_3x4 = np.hstack([Ec_aligned[:3, :3], Ec_aligned[:3, 3:4]])
                 adjusted_extrinsics.append(adjusted_3x4)
-            
-            print(f"Adjusted overlap t: {adjusted_extrinsics[0][3]}")
-            print(f"Should match prev t: {np.allclose(adjusted_extrinsics[0][3], overlap_prev_3x4[3])}")
             
             # Skip the first (overlap) for all
             all_images.append(images_raw[1:])
@@ -159,6 +158,24 @@ def combine_overlapping_predictions(all_predictions, full_image_paths):
     combined.extrinsics = all_extrinsics  # Note: plural, as in original
     combined.intrinsics = all_intrinsics
     combined.conf = np.concatenate(all_confs, axis=0)
+    
+    # Tint batches for debugging alignment (keep brightness, change hue per batch)
+    tints = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0]]  # red, green, blue, yellow
+    batch_effective_frames = [len(all_predictions[0][0].extrinsics)]
+    for i in range(1, len(all_predictions)):
+        # Subsequent batches contribute all but the first (overlap) frame
+        batch_effective_frames.append(len(all_predictions[i][0].extrinsics) - 1)
+
+    start_frame = 0
+    for batch_idx, frames in enumerate(batch_effective_frames):
+        end_frame = start_frame + frames
+        batch_images = combined.processed_images[start_frame:end_frame]  # [frames, H, W, 3]
+        if frames > 0:
+            luminance = batch_images.mean(axis=-1, keepdims=True) / 255.0  # 0-1
+            tint = np.array(tints[batch_idx % len(tints)], dtype=np.float32)
+            tinted = luminance * tint
+            combined.processed_images[start_frame:end_frame] = tinted * 255.0
+        start_frame = end_frame
     
     return combined
 
