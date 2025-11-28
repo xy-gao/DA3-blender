@@ -130,12 +130,34 @@ def combine_overlapping_predictions(all_predictions, full_image_paths):
             # C_prev ≈ T @ C_curr  =>  T = C_prev @ inv(C_curr)
             T_align = Cc_prev @ invert_4x4(Cc_curr)
 
-            # Apply transform in cam->world space, then convert back to world->cam extrinsics
+            # Compare average depth for overlapping frames across batches
+            base_depth = depths[0]
+            prev_batch_depth = all_depths[-1][-1]  # last frame depth of previous batch
+            prev_mean = float(prev_batch_depth.mean())
+            curr_mean = float(base_depth.mean())
+            print("DEBUG overlap depth means:")
+            print("  prev batch overlap mean depth:", prev_mean)
+            print("  current batch overlap mean depth:", curr_mean)
+
+            # Compute a simple scale factor so the mean depth of the
+            # current batch's overlap frame matches the previous batch.
+            scale = prev_mean / curr_mean if curr_mean > 1e-6 else 1.0
+            print("  applied depth scale:", scale)
+
+            # Scale all depths in this batch so that geometry matches across batches
+            depths = depths * scale
+
+            # Apply transform in cam->world space, then convert back to world->cam extrinsics.
+            # NOTE: camera translation encodes depth scale, so we also scale translations
+            # when aligning, to stay consistent with depth scaling.
             adjusted_extrinsics = []
             for ext_3x4 in extrinsics:
                 Ec = extrinsic_to_4x4(ext_3x4)   # world->cam
                 Cc = invert_4x4(Ec)              # cam->world
-                Cc_aligned = T_align @ Cc
+                # Scale camera position before applying global alignment
+                Cc_scaled = Cc.copy()
+                Cc_scaled[:3, 3] *= scale
+                Cc_aligned = T_align @ Cc_scaled
                 Ec_aligned = invert_4x4(Cc_aligned)
                 adjusted_3x4 = np.hstack([Ec_aligned[:3, :3], Ec_aligned[:3, 3:4]])
                 adjusted_extrinsics.append(adjusted_3x4)
