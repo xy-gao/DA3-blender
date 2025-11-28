@@ -63,6 +63,80 @@ def run_single_model(image_paths, model, process_res=504, process_res_method="up
         print("DEBUG dir(prediction):", dir(prediction))
     return prediction, image_paths
 
+def combine_overlapping_predictions(all_predictions, full_image_paths):
+    if not all_predictions:
+        raise ValueError("No predictions to combine")
+    
+    # Assume all_predictions is list of (prediction, start_idx)
+    # First, collect all data
+    all_images = []
+    all_depths = []
+    all_extrinsics = []
+    all_intrinsics = []
+    all_confs = []
+    
+    prev_extrinsics = None
+    prev_overlap_idx = None
+    
+    for i, (prediction, start_idx) in enumerate(all_predictions):
+        pred_dict = convert_prediction_to_dict(prediction, full_image_paths[start_idx:start_idx+len(prediction.extrinsics)])
+        
+        images = pred_dict['images']
+        depths = pred_dict['depth']
+        extrinsics = pred_dict['extrinsic']
+        intrinsics = pred_dict['intrinsic']
+        confs = pred_dict['conf']
+        
+        if i == 0:
+            # First batch, use as is
+            all_images.append(images)
+            all_depths.append(depths)
+            all_extrinsics.extend(extrinsics)
+            all_intrinsics.extend(intrinsics)
+            all_confs.append(confs)
+            prev_extrinsics = extrinsics
+            prev_overlap_idx = len(extrinsics) - 1  # Last frame of this batch
+        else:
+            # Subsequent batches, adjust extrinsics
+            # Overlap frame is the first in this batch, which is start_idx in full list
+            # In previous batch, it was the last
+            overlap_current = extrinsics[0]  # 4x4 matrix
+            overlap_prev = prev_extrinsics[prev_overlap_idx]  # 4x4 matrix
+            
+            # Transform to align: current poses relative to prev's overlap
+            # transform = overlap_prev @ inv(overlap_current)
+            import numpy as np
+            transform = np.dot(overlap_prev, np.linalg.inv(overlap_current))
+            
+            # Apply transform to all extrinsics in this batch
+            adjusted_extrinsics = []
+            for ext in extrinsics:
+                adjusted_ext = np.dot(transform, ext)
+                adjusted_extrinsics.append(adjusted_ext)
+            
+            # Skip the first (overlap) for all except extrinsics? No, since overlap is included, but to avoid duplicate, perhaps skip first for all
+            # But since it's overlap, and we want all unique, but for simplicity, since batches overlap by 1, and we adjust, but to combine, we need to include all, but avoid duplicates.
+            # Actually, for the final result, we want all unique frames, so for batches >0, start from index 1
+            all_images.append(images[1:])
+            all_depths.append(depths[1:])
+            all_extrinsics.extend(adjusted_extrinsics[1:])
+            all_intrinsics.extend(intrinsics[1:])
+            all_confs.append(confs[1:])
+            
+            # Update prev
+            prev_extrinsics = adjusted_extrinsics
+            prev_overlap_idx = len(adjusted_extrinsics) - 1
+    
+    # Concatenate
+    combined = type('CombinedPrediction', (), {})()
+    combined.processed_images = np.concatenate(all_images, axis=0)
+    combined.depth = np.concatenate(all_depths, axis=0)
+    combined.extrinsic = all_extrinsics
+    combined.intrinsic = all_intrinsics
+    combined.conf = np.concatenate(all_confs, axis=0)
+    
+    return combined
+
 def convert_prediction_to_dict(prediction, image_paths=None):
     predictions = {}
 

@@ -84,6 +84,7 @@ def register():
             items=[
                 ("ignore_batch_size", "Ignore Batch Size", "Process all images (may use excessive VRAM)"),
                 ("skip_frames", "Skip Frames", "Process evenly spaced frames"),
+                ("last_frame_overlap", "Last Frame Overlap", "Process overlapping batches for large datasets"),
             ],
             name="Batch Mode",
             description="How to select images for processing",

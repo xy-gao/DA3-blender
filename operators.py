@@ -10,6 +10,7 @@ from .utils import (
     combine_base_with_metric_depth,
     import_point_cloud,
     create_cameras,
+    combine_overlapping_predictions,
 )
 
 add_on_path = Path(__file__).parent
@@ -177,6 +178,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             import numpy as np
             indices = np.linspace(0, len(image_paths) - 1, batch_size, dtype=int)
             image_paths = [image_paths[i] for i in indices]
+        # For last_frame_overlap and ignore_batch_size, use all images
         
         self.report({'INFO'}, f"Processing {len(image_paths)} images...")
         
@@ -187,7 +189,23 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             base_model = get_model(base_model_name)
             wm.progress_update(15)
             self.report({'INFO'}, "Running base model inference...")
-            base_prediction, base_image_paths = run_single_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+            
+            if batch_mode == "last_frame_overlap":
+                # Process in overlapping batches
+                all_base_predictions = []
+                step = batch_size - 1
+                num_batches = (len(image_paths) + step - 1) // step  # Ceiling division
+                for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
+                    end_idx = min(start_idx + batch_size, len(image_paths))
+                    batch_paths = image_paths[start_idx:end_idx]
+                    self.report({'INFO'}, f"Processing batch {batch_idx + 1}/{num_batches} ({len(batch_paths)} images)...")
+                    prediction, _ = run_single_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+                    all_base_predictions.append((prediction, start_idx))
+                base_prediction = combine_overlapping_predictions(all_base_predictions, image_paths)
+                base_image_paths = image_paths
+            else:
+                base_prediction, base_image_paths = run_single_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+            
             wm.progress_update(60)
 
             # 2) if metric enabled and weights available:
@@ -203,7 +221,22 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                     metric_model = get_model("da3metric-large")
                     wm.progress_update(75)
                     self.report({'INFO'}, "Running metric model inference...")
-                    metric_prediction, metric_image_paths = run_single_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                    
+                    if batch_mode == "last_frame_overlap":
+                        # Process in overlapping batches for metric too
+                        all_metric_predictions = []
+                        step = batch_size - 1
+                        num_batches = (len(image_paths) + step - 1) // step
+                        for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
+                            end_idx = min(start_idx + batch_size, len(image_paths))
+                            batch_paths = image_paths[start_idx:end_idx]
+                            prediction, _ = run_single_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                            all_metric_predictions.append((prediction, start_idx))
+                        metric_prediction = combine_overlapping_predictions(all_metric_predictions, image_paths)
+                        metric_image_paths = image_paths
+                    else:
+                        metric_prediction, metric_image_paths = run_single_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                    
                     wm.progress_update(90)
                     metric_model = None
                     unload_current_model()
