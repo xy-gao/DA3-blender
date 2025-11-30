@@ -40,15 +40,13 @@ class DA3Panel(bpy.types.Panel):
                     op = row.operator("da3.download_model", text="Download Metric Model")
                     op.da3_override_model_name = metric_model_name
 
-                # Ray-based pose toggle (only relevant when the model supports camera estimation)
-                layout.prop(scene, "da3_use_ray_pose", text="Use Ray-based Pose")
-
         layout.prop(scene, "da3_input_folder", text="Input Folder")
         layout.prop(scene, "da3_process_res", text="Process Resolution")
         layout.prop(scene, "da3_process_res_method", text="Resize Method")
         layout.prop(scene, "da3_batch_mode", text="Batch Mode")
         if scene.da3_batch_mode != "ignore_batch_size":
             layout.prop(scene, "da3_batch_size", text="Batch Size")
+        layout.prop(scene, "da3_use_ray_pose", text="Use Ray-based Pose")
         layout.prop(scene, "da3_use_half_precision", text="Use Half Precision")
         row = layout.row()
         row.operator("da3.generate_point_cloud")

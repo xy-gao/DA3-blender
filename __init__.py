@@ -114,6 +114,7 @@ def unregister():
         del bpy.types.Scene.da3_process_res
         del bpy.types.Scene.da3_process_res_method
         del bpy.types.Scene.da3_use_half_precision
+        del bpy.types.Scene.da3_use_ray_pose
         del bpy.types.Scene.da3_batch_size
         del bpy.types.Scene.da3_batch_mode
 
