@@ -77,7 +77,7 @@ def register():
         )
         bpy.types.Scene.da3_use_ray_pose = bpy.props.BoolProperty(
             name="Use Ray-based Pose",
-            description="Use ray-based camera pose estimation instead of the camera decoder (slower but potentially more accurate and works on Metric and Mono models)",
+            description="Use ray-based camera pose estimation instead of the camera decoder (slower but potentially more accurate)",
             default=False,
         )
         bpy.types.Scene.da3_batch_size = bpy.props.IntProperty(

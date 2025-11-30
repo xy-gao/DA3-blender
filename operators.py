@@ -231,7 +231,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         # Build batch paths from indices
                         batch_paths = [image_paths[i] for i in batch_indices]
                         print(f"Batch {batch_idx + 1}/{num_batches}:")
-                        prediction = run_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+                        prediction = run_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
                         all_base_predictions.append((prediction, batch_indices.copy()))
 
                         if remaining_start >= N:
@@ -301,7 +301,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                             while True:
                                 batch_paths = [image_paths[i] for i in batch_indices]
                                 print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                                prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
                                 all_metric_predictions.append((prediction, batch_indices.copy()))
 
                                 if remaining_start >= N:
