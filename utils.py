@@ -33,7 +33,7 @@ def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
         world_points[i] = world_points_i.reshape(H, W, 3)
     return world_points
 
-def run_single_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False):
+def run_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False):
     print(f"Processing {len(image_paths)} images")
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -61,7 +61,7 @@ def run_single_model(image_paths, model, process_res=504, process_res_method="up
         print("DEBUG prediction.__dict__ keys:", list(prediction.__dict__.keys()))
     else:
         print("DEBUG dir(prediction):", dir(prediction))
-    return prediction, image_paths
+    return prediction
 
 def combine_overlapping_predictions(all_predictions, full_image_paths):
     if not all_predictions:

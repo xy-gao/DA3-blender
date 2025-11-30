@@ -4,7 +4,7 @@ import os
 import torch
 import numpy as np
 from .utils import (
-    run_single_model,
+    run_model,
     convert_prediction_to_dict,
     combine_base_and_metric,
     combine_base_with_metric_depth,
@@ -205,7 +205,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         batch_paths = image_paths[start_idx:end_idx]
                         batch_indices = list(range(start_idx, end_idx))
                         print(f"Batch {batch_idx + 1}/{num_batches}:")
-                        prediction, _ = run_single_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+                        prediction = run_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
                         all_base_predictions.append((prediction, batch_indices))
                 else:
                     # New scheme: [prev_first_new, prev_last_new] + N new frames
@@ -230,7 +230,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         # Build batch paths from indices
                         batch_paths = [image_paths[i] for i in batch_indices]
                         print(f"Batch {batch_idx + 1}/{num_batches}:")
-                        prediction, _ = run_single_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+                        prediction = run_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
                         all_base_predictions.append((prediction, batch_indices.copy()))
 
                         if remaining_start >= N:
@@ -248,9 +248,8 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         batch_idx += 1
 
                 base_prediction = combine_overlapping_predictions(all_base_predictions, image_paths)
-                base_image_paths = image_paths
             else:
-                base_prediction, base_image_paths = run_single_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+                base_prediction = run_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
             
             wm.progress_update(60)
 
@@ -280,7 +279,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                                 batch_paths = image_paths[start_idx:end_idx]
                                 batch_indices = list(range(start_idx, end_idx))
                                 print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                prediction, _ = run_single_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                                prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
                                 all_metric_predictions.append((prediction, batch_indices))
                         else:
                             N = len(image_paths)
@@ -301,7 +300,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                             while True:
                                 batch_paths = [image_paths[i] for i in batch_indices]
                                 print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                prediction, _ = run_single_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                                prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
                                 all_metric_predictions.append((prediction, batch_indices.copy()))
 
                                 if remaining_start >= N:
@@ -316,9 +315,8 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                                 batch_idx += 1
 
                         metric_prediction = combine_overlapping_predictions(all_metric_predictions, image_paths)
-                        metric_image_paths = image_paths
                     else:
-                        metric_prediction, metric_image_paths = run_single_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                        metric_prediction = run_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
                     
                     wm.progress_update(90)
                     metric_model = None
@@ -332,12 +330,12 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         combined_prediction = combine_base_and_metric(
                             base_prediction, metric_prediction
                         )
-                    combined_predictions = convert_prediction_to_dict(combined_prediction, base_image_paths)
+                    combined_predictions = convert_prediction_to_dict(combined_prediction, image_paths)
                 else:
                     self.report({'WARNING'}, "Metric model not downloaded; using non-metric depth only.")
-                    combined_predictions = convert_prediction_to_dict(base_prediction, base_image_paths)
+                    combined_predictions = convert_prediction_to_dict(base_prediction, image_paths)
             else:
-                combined_predictions = convert_prediction_to_dict(base_prediction, base_image_paths)
+                combined_predictions = convert_prediction_to_dict(base_prediction, image_paths)
 
             # Create or get a collection named after the folder
             folder_name = os.path.basename(os.path.normpath(input_folder))
