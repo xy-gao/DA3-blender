@@ -143,6 +143,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         base_model_name = context.scene.da3_model_name
         use_metric = context.scene.da3_use_metric
         metric_mode = getattr(context.scene, "da3_metric_mode", "scale_base")
+        use_ray_pose = getattr(context.scene, "da3_use_ray_pose", False)
         process_res = context.scene.da3_process_res
         process_res_method = context.scene.da3_process_res_method
         use_half_precision = context.scene.da3_use_half_precision
@@ -205,7 +206,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         batch_paths = image_paths[start_idx:end_idx]
                         batch_indices = list(range(start_idx, end_idx))
                         print(f"Batch {batch_idx + 1}/{num_batches}:")
-                        prediction = run_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+                        prediction = run_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
                         all_base_predictions.append((prediction, batch_indices))
                 else:
                     # New scheme: [prev_first_new, prev_last_new] + N new frames
@@ -249,7 +250,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
 
                 base_prediction = combine_overlapping_predictions(all_base_predictions, image_paths)
             else:
-                base_prediction = run_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision)
+                base_prediction = run_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
             
             wm.progress_update(60)
 
@@ -279,7 +280,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                                 batch_paths = image_paths[start_idx:end_idx]
                                 batch_indices = list(range(start_idx, end_idx))
                                 print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                                prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
                                 all_metric_predictions.append((prediction, batch_indices))
                         else:
                             N = len(image_paths)
@@ -316,7 +317,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
 
                         metric_prediction = combine_overlapping_predictions(all_metric_predictions, image_paths)
                     else:
-                        metric_prediction = run_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision)
+                        metric_prediction = run_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
                     
                     wm.progress_update(90)
                     metric_model = None

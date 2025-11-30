@@ -33,6 +33,7 @@ def register():
                 ('da3-base', 'DA3 Base', 'Base model with balanced performance'),
                 ('da3-large', 'DA3 Large', 'Large model for better quality'),
                 ('da3-giant', 'DA3 Giant', 'Giant model for highest quality'),
+                ("da3metric-large", "DA3 Metric Large", "Metric depth model"),
                 ('da3mono-large', 'DA3 Mono Large', 'Single image depth estimation'),
                 ('da3nested-giant-large', 'DA3 Nested Giant Large', 'Nested depth estimation'),
             ],
@@ -72,6 +73,11 @@ def register():
         bpy.types.Scene.da3_use_half_precision = bpy.props.BoolProperty(
             name="Use Half Precision",
             description="Use 16-bit floats for reduced VRAM usage",
+            default=False,
+        )
+        bpy.types.Scene.da3_use_ray_pose = bpy.props.BoolProperty(
+            name="Use Ray-based Pose",
+            description="Use ray-based camera pose estimation instead of the camera decoder (slower but potentially more accurate and works on Metric and Mono models)",
             default=False,
         )
         bpy.types.Scene.da3_batch_size = bpy.props.IntProperty(

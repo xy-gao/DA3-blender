@@ -33,7 +33,7 @@ def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
         world_points[i] = world_points_i.reshape(H, W, 3)
     return world_points
 
-def run_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False):
+def run_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False, use_ray_pose=False):
     print(f"Processing {len(image_paths)} images")
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -45,9 +45,9 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
     import torch.cuda.amp as amp
     if use_half:
         with amp.autocast():
-            prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method)
+            prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
     else:
-        prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method)
+        prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
     if torch.cuda.is_available():
         peak = torch.cuda.max_memory_allocated() / 1024**2
         allocated = torch.cuda.memory_allocated() / 1024**2
