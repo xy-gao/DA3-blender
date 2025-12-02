@@ -386,7 +386,7 @@ def combine_base_with_metric_depth(base, metric):
         return x
 
     # Base / metric depths and sky mask
-    base_depth = to_tensor(output.depth).float()        # [B, H, W]
+    base_depth = to_tensor(base.depth).float()        # [B, H, W]
     metric_depth = to_tensor(metric.depth).float()      # [B, H, W]
     sky = to_tensor(metric.sky).float()                 # [B, H, W]
 

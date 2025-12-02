@@ -152,10 +152,6 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             self.report({'ERROR'}, "Process resolution must be a multiple of 14.")
             return {'CANCELLED'}
         
-        # Warn about potential timeout with high resolution
-        if process_res > 400:
-            self.report({'WARNING'}, "High process resolution may cause GPU timeout. Consider reducing to 350-392 for stability.")
-        
         if not input_folder or not os.path.isdir(input_folder):
             self.report({'ERROR'}, "Please select a valid input folder.")
             return {'CANCELLED'}
