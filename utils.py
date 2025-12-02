@@ -203,19 +203,27 @@ def align_batches(all_predictions):
         # Apply scale to current depth
         curr_pred.depth = to_numpy(curr_depth * scale)
         
-        # Compute rigid transform candidates
+        # Compute similarity transform T that maps P_world_curr to P_world_prev
+        # P_world_prev = T @ P_world_curr
+        # We derive T from: E_prev @ P_world_prev = s * E_curr @ P_world_curr
+        # E_prev @ T @ P_world_curr = S @ E_curr @ P_world_curr
+        # T = inv(E_prev) @ S @ E_curr
+        
+        S = torch.eye(4, device=curr_depth.device, dtype=curr_depth.dtype)
+        S[0, 0] = scale
+        S[1, 1] = scale
+        S[2, 2] = scale
+        
         candidate_Ts = []
         
         for E_prev, E_curr in transforms:
-            # Scale E_curr translation
-            E_curr_scaled = E_curr.clone()
-            E_curr_scaled[:3, 3] *= scale
-            
-            # T = E_prev^-1 @ E_curr_scaled
-            T = invert_4x4(E_prev) @ E_curr_scaled
+            # T = inv(E_prev) @ S @ E_curr
+            # S @ E_curr scales the rotation and translation of E_curr
+            SE_curr = S @ E_curr
+            T = invert_4x4(E_prev) @ SE_curr
             candidate_Ts.append(T)
             
-        # Select best T (minimize translation error across all overlapping frames)
+        # Select best T (minimize error across all overlapping frames)
         best_T = None
         min_error = float('inf')
         
@@ -227,9 +235,13 @@ def align_batches(all_predictions):
                 T_cand_inv = invert_4x4(T_cand)
                 
                 for E_prev, E_curr in transforms:
-                    E_curr_scaled = E_curr.clone()
-                    E_curr_scaled[:3, 3] *= scale
-                    E_new = E_curr_scaled @ T_cand_inv
+                    # Check consistency: E_new should match E_prev
+                    # E_new = S @ E_curr @ inv(T)
+                    # We compare E_new translation with E_prev translation
+                    # Note: E_new is rigid, E_prev is rigid.
+                    
+                    SE_curr = S @ E_curr
+                    E_new = SE_curr @ T_cand_inv
                     
                     # Error = distance between E_new translation and E_prev translation
                     dist = torch.norm(E_new[:3, 3] - E_prev[:3, 3]).item()
@@ -243,18 +255,23 @@ def align_batches(all_predictions):
             print(f"Batch {i} alignment: Best T error = {min_error:.4f} (selected from {len(candidate_Ts)} candidates)")
         else:
             best_T = torch.eye(4, device=curr_depth.device, dtype=curr_depth.dtype)
+            # If no overlap, we still need to apply scale to extrinsics?
+            # If we just scale depth, we should scale extrinsics translation too.
+            # T = S (pure scaling)
+            best_T = S
 
         T_align = best_T
+        T_align_inv = invert_4x4(T_align)
 
         # Apply T_align to all extrinsics in curr_batch
-        T_align_inv = invert_4x4(T_align)
+        # E_new = S @ E_curr @ inv(T)
         
         new_extrinsics = []
         for ext_3x4 in curr_ext:
-            E_curr_scaled = extrinsic_to_4x4(ext_3x4)
-            E_curr_scaled[:3, 3] *= scale
+            E_curr = extrinsic_to_4x4(ext_3x4)
+            SE_curr = S @ E_curr
             
-            E_new = E_curr_scaled @ T_align_inv
+            E_new = SE_curr @ T_align_inv
             new_extrinsics.append(E_new[:3, :4])
             
         curr_pred.extrinsics = to_numpy(torch.stack(new_extrinsics))
