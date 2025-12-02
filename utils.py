@@ -63,6 +63,47 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
         print("DEBUG dir(prediction):", dir(prediction))
     return prediction
 
+# Helper functions for matrix operations and type conversion
+def _to_tensor(x):
+    if isinstance(x, np.ndarray):
+        return torch.from_numpy(x)
+    return x
+
+def _to_numpy(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().float().numpy()
+    return np.array(x)
+
+def _extrinsic_to_4x4_torch(ext_3x4):
+    if ext_3x4.shape == (3, 4):
+        last_row = torch.tensor([0, 0, 0, 1], device=ext_3x4.device, dtype=ext_3x4.dtype)
+        return torch.cat([ext_3x4, last_row.unsqueeze(0)], dim=0)
+    return ext_3x4
+
+def _invert_4x4_torch(T):
+    R = T[:3, :3]
+    t = T[:3, 3]
+    T_inv = torch.eye(4, device=T.device, dtype=T.dtype)
+    T_inv[:3, :3] = R.T
+    T_inv[:3, 3] = -R.T @ t
+    return T_inv
+
+def _extrinsic_to_4x4_numpy(ext_3x4):
+    R = ext_3x4[:, :3]
+    t = ext_3x4[:, 3]
+    T = np.eye(4, dtype=np.float32)
+    T[:3, :3] = R
+    T[:3, 3] = t
+    return T
+
+def _invert_4x4_numpy(T_4x4):
+    R = T_4x4[:3, :3]
+    t = T_4x4[:3, 3]
+    T_inv = np.eye(4, dtype=np.float32)
+    T_inv[:3, :3] = R.T
+    T_inv[:3, 3] = -R.T @ t
+    return T_inv
+
 def align_batches(all_predictions):
     if not all_predictions:
         return []
@@ -77,31 +118,6 @@ def align_batches(all_predictions):
     prev_pred = first_pred
     prev_indices = first_indices
     
-    # Helper to ensure numpy/torch
-    def to_tensor(x):
-        if isinstance(x, np.ndarray):
-            return torch.from_numpy(x)
-        return x
-        
-    def to_numpy(x):
-        if isinstance(x, torch.Tensor):
-            return x.detach().cpu().float().numpy()
-        return np.array(x)
-
-    def extrinsic_to_4x4(ext_3x4):
-        if ext_3x4.shape == (3, 4):
-            last_row = torch.tensor([0, 0, 0, 1], device=ext_3x4.device, dtype=ext_3x4.dtype)
-            return torch.cat([ext_3x4, last_row.unsqueeze(0)], dim=0)
-        return ext_3x4
-
-    def invert_4x4(T):
-        R = T[:3, :3]
-        t = T[:3, 3]
-        T_inv = torch.eye(4, device=T.device, dtype=T.dtype)
-        T_inv[:3, :3] = R.T
-        T_inv[:3, 3] = -R.T @ t
-        return T_inv
-
     for i in range(1, len(all_predictions)):
         curr_pred_orig, curr_indices = all_predictions[i]
         
@@ -109,11 +125,11 @@ def align_batches(all_predictions):
         import copy
         curr_pred = copy.copy(curr_pred_orig)
         
-        curr_depth = to_tensor(curr_pred.depth).float()
-        curr_ext = to_tensor(curr_pred.extrinsics)
+        curr_depth = _to_tensor(curr_pred.depth).float()
+        curr_ext = _to_tensor(curr_pred.extrinsics)
         if curr_ext is not None:
             curr_ext = curr_ext.float()
-        curr_conf = to_tensor(curr_pred.conf).float()
+        curr_conf = _to_tensor(curr_pred.conf).float()
         
         if curr_ext is None:
             print(f"Batch {i} has no extrinsics, skipping alignment.")
@@ -122,9 +138,9 @@ def align_batches(all_predictions):
             prev_indices = curr_indices
             continue
 
-        prev_depth = to_tensor(prev_pred.depth).float()
-        prev_ext = to_tensor(prev_pred.extrinsics).float()
-        prev_conf = to_tensor(prev_pred.conf).float()
+        prev_depth = _to_tensor(prev_pred.depth).float()
+        prev_ext = _to_tensor(prev_pred.extrinsics).float()
+        prev_conf = _to_tensor(prev_pred.conf).float()
         
         # Find overlapping indices
         common_indices = set(prev_indices) & set(curr_indices)
@@ -157,9 +173,9 @@ def align_batches(all_predictions):
             # Compute non_sky_mask
             non_sky_mask = torch.ones_like(d_prev, dtype=torch.bool)
             if hasattr(prev_pred, 'sky') and prev_pred.sky is not None:
-                 non_sky_mask = non_sky_mask & compute_sky_mask(to_tensor(prev_pred.sky)[idx_prev], threshold=0.3)
+                 non_sky_mask = non_sky_mask & compute_sky_mask(_to_tensor(prev_pred.sky)[idx_prev], threshold=0.3)
             if hasattr(curr_pred, 'sky') and curr_pred.sky is not None:
-                 non_sky_mask = non_sky_mask & compute_sky_mask(to_tensor(curr_pred.sky)[idx_curr], threshold=0.3)
+                 non_sky_mask = non_sky_mask & compute_sky_mask(_to_tensor(curr_pred.sky)[idx_curr], threshold=0.3)
             
             # Use compute_alignment_mask for robust pixel selection
             # Ensure inputs are at least 3D [1, H, W] for the utils
@@ -184,8 +200,8 @@ def align_batches(all_predictions):
                 valid_prev_depths.append(d_prev[mask])
                 valid_curr_depths.append(d_curr[mask])
             
-            E_prev = extrinsic_to_4x4(prev_ext[idx_prev])
-            E_curr = extrinsic_to_4x4(curr_ext[idx_curr])
+            E_prev = _extrinsic_to_4x4_torch(prev_ext[idx_prev])
+            E_curr = _extrinsic_to_4x4_torch(curr_ext[idx_curr])
             
             transforms.append((E_prev, E_curr))
 
@@ -201,7 +217,7 @@ def align_batches(all_predictions):
         print(f"Batch {i} alignment: scale={scale_val}")
         
         # Apply scale to current depth
-        curr_pred.depth = to_numpy(curr_depth * scale)
+        curr_pred.depth = _to_numpy(curr_depth * scale)
         
         # Compute similarity transform T that maps P_world_curr to P_world_prev
         # P_world_prev = T @ P_world_curr
@@ -220,7 +236,7 @@ def align_batches(all_predictions):
             # T = inv(E_prev) @ S @ E_curr
             # S @ E_curr scales the rotation and translation of E_curr
             SE_curr = S @ E_curr
-            T = invert_4x4(E_prev) @ SE_curr
+            T = _invert_4x4_torch(E_prev) @ SE_curr
             candidate_Ts.append(T)
             
         # Select best T (minimize error across all overlapping frames)
@@ -232,7 +248,7 @@ def align_batches(all_predictions):
         elif len(candidate_Ts) > 1:
             for idx, T_cand in enumerate(candidate_Ts):
                 error = 0.0
-                T_cand_inv = invert_4x4(T_cand)
+                T_cand_inv = _invert_4x4_torch(T_cand)
                 
                 for E_prev, E_curr in transforms:
                     # Check consistency: E_new should match E_prev
@@ -261,20 +277,20 @@ def align_batches(all_predictions):
             best_T = S
 
         T_align = best_T
-        T_align_inv = invert_4x4(T_align)
+        T_align_inv = _invert_4x4_torch(T_align)
 
         # Apply T_align to all extrinsics in curr_batch
         # E_new = S @ E_curr @ inv(T)
         
         new_extrinsics = []
         for ext_3x4 in curr_ext:
-            E_curr = extrinsic_to_4x4(ext_3x4)
+            E_curr = _extrinsic_to_4x4_torch(ext_3x4)
             SE_curr = S @ E_curr
             
             E_new = SE_curr @ T_align_inv
             new_extrinsics.append(E_new[:3, :4])
             
-        curr_pred.extrinsics = to_numpy(torch.stack(new_extrinsics))
+        curr_pred.extrinsics = _to_numpy(torch.stack(new_extrinsics))
         
         aligned_predictions.append(curr_pred)
         prev_pred = curr_pred
@@ -324,33 +340,15 @@ def combine_overlapping_predictions(all_predictions, full_image_paths):
             overlap_current_3x4 = extrinsics[0]
             overlap_prev_3x4 = prev_extrinsics[prev_overlap_idx]
             
-            # Convert world-to-camera extrinsics (3x4) to 4x4
-            def extrinsic_to_4x4(ext_3x4):
-                R = ext_3x4[:, :3]
-                t = ext_3x4[:, 3]
-                T = np.eye(4, dtype=np.float32)
-                T[:3, :3] = R
-                T[:3, 3] = t
-                return T
-
-            # Invert a 4x4 rigid transform
-            def invert_4x4(T_4x4):
-                R = T_4x4[:3, :3]
-                t = T_4x4[:3, 3]
-                T_inv = np.eye(4, dtype=np.float32)
-                T_inv[:3, :3] = R.T
-                T_inv[:3, 3] = -R.T @ t
-                return T_inv
-
             # Work in camera-to-world space for alignment
-            Ec_curr = extrinsic_to_4x4(overlap_current_3x4)   # world->cam (current overlap)
-            Ec_prev = extrinsic_to_4x4(overlap_prev_3x4)      # world->cam (prev overlap)
-            Cc_curr = invert_4x4(Ec_curr)  # cam->world
-            Cc_prev = invert_4x4(Ec_prev)  # cam->world
+            Ec_curr = _extrinsic_to_4x4_numpy(overlap_current_3x4)   # world->cam (current overlap)
+            Ec_prev = _extrinsic_to_4x4_numpy(overlap_prev_3x4)      # world->cam (prev overlap)
+            Cc_curr = _invert_4x4_numpy(Ec_curr)  # cam->world
+            Cc_prev = _invert_4x4_numpy(Ec_prev)  # cam->world
 
             # Transform that maps current cameras into previous world frame
             # C_prev ≈ T @ C_curr  =>  T = C_prev @ inv(C_curr)
-            T_align = Cc_prev @ invert_4x4(Cc_curr)
+            T_align = Cc_prev @ _invert_4x4_numpy(Cc_curr)
 
             # Compare average depth for overlapping frames across batches
             base_depth = depths[0]
@@ -374,13 +372,13 @@ def combine_overlapping_predictions(all_predictions, full_image_paths):
             # when aligning, to stay consistent with depth scaling.
             adjusted_extrinsics = []
             for ext_3x4 in extrinsics:
-                Ec = extrinsic_to_4x4(ext_3x4)   # world->cam
-                Cc = invert_4x4(Ec)              # cam->world
+                Ec = _extrinsic_to_4x4_numpy(ext_3x4)   # world->cam
+                Cc = _invert_4x4_numpy(Ec)              # cam->world
                 # Scale camera position before applying global alignment
                 Cc_scaled = Cc.copy()
                 Cc_scaled[:3, 3] *= scale
                 Cc_aligned = T_align @ Cc_scaled
-                Ec_aligned = invert_4x4(Cc_aligned)
+                Ec_aligned = _invert_4x4_numpy(Cc_aligned)
                 adjusted_3x4 = np.hstack([Ec_aligned[:3, :3], Ec_aligned[:3, 3:4]])
                 adjusted_extrinsics.append(adjusted_3x4)
             
@@ -430,15 +428,9 @@ def convert_prediction_to_dict(prediction, image_paths=None):
     predictions['images'] = prediction.processed_images.astype(np.float32) / 255.0  # [N, H, W, 3]
 
     # depth / extrinsics / intrinsics may be torch tensors after combination; ensure numpy
-    def to_numpy(x):
-        import torch
-        if isinstance(x, torch.Tensor):
-            return x.detach().cpu().float().numpy()  # Ensure float32
-        return x
-
-    predictions['depth'] = to_numpy(prediction.depth)
-    predictions['extrinsic'] = to_numpy(prediction.extrinsics)
-    predictions['intrinsic'] = to_numpy(prediction.intrinsics)
+    predictions['depth'] = _to_numpy(prediction.depth)
+    predictions['extrinsic'] = _to_numpy(prediction.extrinsics)
+    predictions['intrinsic'] = _to_numpy(prediction.intrinsics)
     predictions['conf'] = prediction.conf
 
     if image_paths is not None:
@@ -484,16 +476,10 @@ def combine_base_and_metric(base, metric):
     intrinsics = output.intrinsics  # [B, 3, 3]
     sky = metric.sky              # [B, H, W]
 
-    # Helper: numpy -> torch if needed
-    def to_tensor(x):
-        if isinstance(x, np.ndarray):
-            return torch.from_numpy(x)
-        return x
-
-    depth = to_tensor(depth)
-    metric_depth = to_tensor(metric_depth)
-    intrinsics = to_tensor(intrinsics)
-    sky = to_tensor(sky)
+    depth = _to_tensor(depth)
+    metric_depth = _to_tensor(metric_depth)
+    intrinsics = _to_tensor(intrinsics)
+    sky = _to_tensor(sky)
 
     # Ensure everything is float
     depth = depth.float()
@@ -553,7 +539,7 @@ def combine_base_and_metric(base, metric):
     depth = depth * scale_factor
 
     # Scale extrinsics translation
-    extrinsics = to_tensor(output.extrinsics)
+    extrinsics = _to_tensor(output.extrinsics)
     print("DEBUG combine_base_and_metric: extrinsics shape:", extrinsics.shape)
 
     if extrinsics.ndim == 3:
@@ -612,15 +598,10 @@ def combine_base_with_metric_depth(base, metric):
     """
     output = base
 
-    def to_tensor(x):
-        if isinstance(x, np.ndarray):
-            return torch.from_numpy(x)
-        return x
-
     # Base / metric depths and sky mask
-    base_depth = to_tensor(base.depth).float()        # [B, H, W]
-    metric_depth = to_tensor(metric.depth).float()      # [B, H, W]
-    sky = to_tensor(metric.sky).float()                 # [B, H, W]
+    base_depth = _to_tensor(base.depth).float()        # [B, H, W]
+    metric_depth = _to_tensor(metric.depth).float()      # [B, H, W]
+    sky = _to_tensor(metric.sky).float()                 # [B, H, W]
 
     if base_depth.ndim != 3 or metric_depth.ndim != 3:
         raise ValueError(
@@ -668,7 +649,7 @@ def combine_base_with_metric_depth(base, metric):
     depth = depth_4d.squeeze(1)
 
     # Scale base extrinsics translation so cameras match metric scale
-    extrinsics = to_tensor(output.extrinsics)
+    extrinsics = _to_tensor(output.extrinsics)
     print("DEBUG combine_base_with_metric_depth: extrinsics shape:", extrinsics.shape)
 
     if extrinsics.ndim == 3:
