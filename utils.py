@@ -63,6 +63,97 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
         print("DEBUG dir(prediction):", dir(prediction))
     return prediction
 
+def align_batches(all_predictions):
+    if not all_predictions:
+        return []
+
+    aligned_predictions = []
+    
+    # First batch is reference
+    # all_predictions is list of (prediction, indices)
+    first_pred, _ = all_predictions[0]
+    aligned_predictions.append(first_pred)
+    
+    prev_pred = first_pred
+    
+    for i in range(1, len(all_predictions)):
+        curr_pred_orig, _ = all_predictions[i]
+        
+        # Shallow copy to avoid modifying original
+        import copy
+        curr_pred = copy.copy(curr_pred_orig)
+        
+        # Helper to ensure numpy
+        def to_numpy(x):
+            import torch
+            if isinstance(x, torch.Tensor):
+                return x.detach().cpu().float().numpy()
+            return np.array(x)
+
+        curr_depth = to_numpy(curr_pred.depth)
+        curr_ext = to_numpy(curr_pred.extrinsics) # [N, 3, 4]
+        
+        prev_depth = to_numpy(prev_pred.depth)
+        prev_ext = to_numpy(prev_pred.extrinsics)
+        
+        # Overlap: last of prev, first of curr
+        prev_overlap_depth = prev_depth[-1]
+        curr_overlap_depth = curr_depth[0]
+        
+        prev_overlap_ext = prev_ext[-1]
+        curr_overlap_ext = curr_ext[0]
+        
+        # Compute scale
+        prev_mean = float(prev_overlap_depth.mean())
+        curr_mean = float(curr_overlap_depth.mean())
+        scale = prev_mean / curr_mean if curr_mean > 1e-6 else 1.0
+        
+        # Scale depth
+        curr_pred.depth = curr_depth * scale
+        
+        # Align extrinsics
+        def extrinsic_to_4x4(ext_3x4):
+            R = ext_3x4[:, :3]
+            t = ext_3x4[:, 3]
+            T = np.eye(4, dtype=np.float32)
+            T[:3, :3] = R
+            T[:3, 3] = t
+            return T
+
+        def invert_4x4(T_4x4):
+            R = T_4x4[:3, :3]
+            t = T_4x4[:3, 3]
+            T_inv = np.eye(4, dtype=np.float32)
+            T_inv[:3, :3] = R.T
+            T_inv[:3, 3] = -R.T @ t
+            return T_inv
+
+        Ec_curr = extrinsic_to_4x4(curr_overlap_ext)
+        Ec_prev = extrinsic_to_4x4(prev_overlap_ext)
+        Cc_curr = invert_4x4(Ec_curr)
+        Cc_prev = invert_4x4(Ec_prev)
+        
+        Cc_curr_scaled = Cc_curr.copy()
+        Cc_curr_scaled[:3, 3] *= scale
+        
+        T_align = Cc_prev @ invert_4x4(Cc_curr_scaled)
+        
+        new_extrinsics = []
+        for ext_3x4 in curr_ext:
+            Ec = extrinsic_to_4x4(ext_3x4)
+            Cc = invert_4x4(Ec)
+            Cc[:3, 3] *= scale
+            Cc_aligned = T_align @ Cc
+            Ec_aligned = invert_4x4(Cc_aligned)
+            new_extrinsics.append(Ec_aligned[:3, :4])
+            
+        curr_pred.extrinsics = np.array(new_extrinsics)
+        
+        aligned_predictions.append(curr_pred)
+        prev_pred = curr_pred
+        
+    return aligned_predictions
+
 def combine_overlapping_predictions(all_predictions, full_image_paths):
     if not all_predictions:
         raise ValueError("No predictions to combine")

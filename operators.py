@@ -11,6 +11,7 @@ from .utils import (
     import_point_cloud,
     create_cameras,
     combine_overlapping_predictions,
+    align_batches,
 )
 
 add_on_path = Path(__file__).parent
@@ -189,10 +190,10 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             wm.progress_update(15)
             self.report({'INFO'}, "Running base model inference...")
             
+            all_base_predictions = []
+            
             if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
                 # Process in overlapping batches
-                all_base_predictions = []
-
                 if batch_mode == "last_frame_overlap":
                     # Existing scheme: last frame of previous batch overlaps with first of next
                     step = batch_size - 1
@@ -243,17 +244,20 @@ class GeneratePointCloudOperator(bpy.types.Operator):
 
                         remaining_start += len(next_indices)
                         batch_idx += 1
-
-                base_prediction = combine_overlapping_predictions(all_base_predictions, image_paths)
             else:
-                base_prediction = run_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
+                prediction = run_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
+                all_base_predictions.append((prediction, list(range(len(image_paths)))))
             
             wm.progress_update(60)
 
             # 2) if metric enabled and weights available:
+            all_metric_predictions = []
+            metric_available = False
+            
             if use_metric:
                 metric_path = get_model_path("da3metric-large")
                 if os.path.exists(metric_path):
+                    metric_available = True
                     # free base model from VRAM before loading metric
                     wm.progress_update(65)
                     self.report({'INFO'}, "Unloading base model and loading metric model...")
@@ -266,8 +270,6 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                     
                     if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
                         # Process in overlapping batches for metric too (mirror base logic)
-                        all_metric_predictions = []
-
                         if batch_mode == "last_frame_overlap":
                             step = batch_size - 1
                             num_batches = (len(image_paths) + step - 1) // step
@@ -310,46 +312,67 @@ class GeneratePointCloudOperator(bpy.types.Operator):
 
                                 remaining_start += len(next_indices)
                                 batch_idx += 1
-
-                        metric_prediction = combine_overlapping_predictions(all_metric_predictions, image_paths)
                     else:
-                        metric_prediction = run_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
+                        prediction = run_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
+                        all_metric_predictions.append((prediction, list(range(len(image_paths)))))
                     
                     wm.progress_update(90)
                     metric_model = None
                     unload_current_model()
-
-                    if metric_mode == "metric_depth":
-                        combined_prediction = combine_base_with_metric_depth(
-                            base_prediction, metric_prediction
-                        )
-                    else:
-                        combined_prediction = combine_base_and_metric(
-                            base_prediction, metric_prediction
-                        )
-                    combined_predictions = convert_prediction_to_dict(combined_prediction, image_paths)
                 else:
                     self.report({'WARNING'}, "Metric model not downloaded; using non-metric depth only.")
-                    combined_predictions = convert_prediction_to_dict(base_prediction, image_paths)
+            
+            # Align batches
+            if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+                aligned_base_predictions = align_batches(all_base_predictions)
+                if metric_available:
+                    aligned_metric_predictions = align_batches(all_metric_predictions)
             else:
-                combined_predictions = convert_prediction_to_dict(base_prediction, image_paths)
+                aligned_base_predictions = [p[0] for p in all_base_predictions]
+                if metric_available:
+                    aligned_metric_predictions = [p[0] for p in all_metric_predictions]
 
             # Create or get a collection named after the folder
             folder_name = os.path.basename(os.path.normpath(input_folder))
             scene = context.scene
             collections = bpy.data.collections
-            target_col = collections.new(folder_name)
-            scene.collection.children.link(target_col)
-
-            # 3) import point cloud and create cameras
-            import_point_cloud(combined_predictions, collection=target_col)
-            self.report({'INFO'}, "Point cloud generated and imported successfully.")
-            create_cameras(combined_predictions, collection=target_col)
-            self.report({'INFO'}, "Cameras generated successfully.")
             
+            # Create parent collection
+            parent_col = collections.new(folder_name)
+            scene.collection.children.link(parent_col)
+
+            # Process each batch
+            for i, base_pred in enumerate(aligned_base_predictions):
+                batch_indices = all_base_predictions[i][1]
+                batch_paths = [image_paths[j] for j in batch_indices]
+                
+                if metric_available:
+                    metric_pred = aligned_metric_predictions[i]
+                    if metric_mode == "metric_depth":
+                        combined_prediction = combine_base_with_metric_depth(
+                            base_pred, metric_pred
+                        )
+                    else:
+                        combined_prediction = combine_base_and_metric(
+                            base_pred, metric_pred
+                        )
+                else:
+                    combined_prediction = base_pred
+                
+                combined_predictions = convert_prediction_to_dict(combined_prediction, batch_paths)
+                
+                # Create batch collection
+                batch_col_name = f"{folder_name}_Batch_{i+1}"
+                batch_col = collections.new(batch_col_name)
+                parent_col.children.link(batch_col)
+                
+                import_point_cloud(combined_predictions, collection=batch_col)
+                create_cameras(combined_predictions, collection=batch_col)
+            
+            self.report({'INFO'}, "Point cloud generation complete.")
             wm.progress_update(100)
             wm.progress_end()
-            self.report({'INFO'}, "Point cloud generation complete.")
+            
         except Exception as e:
             wm.progress_end()
             import traceback
