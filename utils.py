@@ -77,6 +77,31 @@ def align_batches(all_predictions):
     prev_pred = first_pred
     prev_indices = first_indices
     
+    # Helper to ensure numpy/torch
+    def to_tensor(x):
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x)
+        return x
+        
+    def to_numpy(x):
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().float().numpy()
+        return np.array(x)
+
+    def extrinsic_to_4x4(ext_3x4):
+        if ext_3x4.shape == (3, 4):
+            last_row = torch.tensor([0, 0, 0, 1], device=ext_3x4.device, dtype=ext_3x4.dtype)
+            return torch.cat([ext_3x4, last_row.unsqueeze(0)], dim=0)
+        return ext_3x4
+
+    def invert_4x4(T):
+        R = T[:3, :3]
+        t = T[:3, 3]
+        T_inv = torch.eye(4, device=T.device, dtype=T.dtype)
+        T_inv[:3, :3] = R.T
+        T_inv[:3, 3] = -R.T @ t
+        return T_inv
+
     for i in range(1, len(all_predictions)):
         curr_pred_orig, curr_indices = all_predictions[i]
         
@@ -84,21 +109,19 @@ def align_batches(all_predictions):
         import copy
         curr_pred = copy.copy(curr_pred_orig)
         
-        # Helper to ensure numpy/torch
-        def to_tensor(x):
-            if isinstance(x, np.ndarray):
-                return torch.from_numpy(x)
-            return x
-            
-        def to_numpy(x):
-            if isinstance(x, torch.Tensor):
-                return x.detach().cpu().float().numpy()
-            return np.array(x)
-
         curr_depth = to_tensor(curr_pred.depth).float()
-        curr_ext = to_tensor(curr_pred.extrinsics).float() # [N, 3, 4]
+        curr_ext = to_tensor(curr_pred.extrinsics)
+        if curr_ext is not None:
+            curr_ext = curr_ext.float()
         curr_conf = to_tensor(curr_pred.conf).float()
         
+        if curr_ext is None:
+            print(f"Batch {i} has no extrinsics, skipping alignment.")
+            aligned_predictions.append(curr_pred)
+            prev_pred = curr_pred
+            prev_indices = curr_indices
+            continue
+
         prev_depth = to_tensor(prev_pred.depth).float()
         prev_ext = to_tensor(prev_pred.extrinsics).float()
         prev_conf = to_tensor(prev_pred.conf).float()
@@ -161,12 +184,6 @@ def align_batches(all_predictions):
                 valid_prev_depths.append(d_prev[mask])
                 valid_curr_depths.append(d_curr[mask])
             
-            def extrinsic_to_4x4(ext_3x4):
-                if ext_3x4.shape == (3, 4):
-                    last_row = torch.tensor([0, 0, 0, 1], device=ext_3x4.device, dtype=ext_3x4.dtype)
-                    return torch.cat([ext_3x4, last_row.unsqueeze(0)], dim=0)
-                return ext_3x4
-
             E_prev = extrinsic_to_4x4(prev_ext[idx_prev])
             E_curr = extrinsic_to_4x4(curr_ext[idx_curr])
             
@@ -186,17 +203,8 @@ def align_batches(all_predictions):
         # Apply scale to current depth
         curr_pred.depth = to_numpy(curr_depth * scale)
         
-        # Compute rigid transform
-        def invert_4x4(T):
-            R = T[:3, :3]
-            t = T[:3, 3]
-            T_inv = torch.eye(4, device=T.device, dtype=T.dtype)
-            T_inv[:3, :3] = R.T
-            T_inv[:3, 3] = -R.T @ t
-            return T_inv
-
-        ts = []
-        Rs = []
+        # Compute rigid transform candidates
+        candidate_Ts = []
         
         for E_prev, E_curr in transforms:
             # Scale E_curr translation
@@ -205,22 +213,38 @@ def align_batches(all_predictions):
             
             # T = E_prev^-1 @ E_curr_scaled
             T = invert_4x4(E_prev) @ E_curr_scaled
-            ts.append(T[:3, 3])
-            Rs.append(T[:3, :3])
+            candidate_Ts.append(T)
             
-        # Average translation and rotation
-        if ts:
-            avg_t = torch.stack(ts).mean(dim=0)
+        # Select best T (minimize translation error across all overlapping frames)
+        best_T = None
+        min_error = float('inf')
+        
+        if len(candidate_Ts) == 1:
+            best_T = candidate_Ts[0]
+        elif len(candidate_Ts) > 1:
+            for idx, T_cand in enumerate(candidate_Ts):
+                error = 0.0
+                T_cand_inv = invert_4x4(T_cand)
+                
+                for E_prev, E_curr in transforms:
+                    E_curr_scaled = E_curr.clone()
+                    E_curr_scaled[:3, 3] *= scale
+                    E_new = E_curr_scaled @ T_cand_inv
+                    
+                    # Error = distance between E_new translation and E_prev translation
+                    dist = torch.norm(E_new[:3, 3] - E_prev[:3, 3]).item()
+                    error += dist
+                
+                print(f"  Candidate {idx} error: {error:.4f}")
+                if error < min_error:
+                    min_error = error
+                    best_T = T_cand
             
-            avg_R_raw = torch.stack(Rs).mean(dim=0)
-            U, S, V = torch.svd(avg_R_raw)
-            avg_R = U @ V.T
-            
-            T_align = torch.eye(4, device=avg_t.device, dtype=avg_t.dtype)
-            T_align[:3, :3] = avg_R
-            T_align[:3, 3] = avg_t
+            print(f"Batch {i} alignment: Best T error = {min_error:.4f} (selected from {len(candidate_Ts)} candidates)")
         else:
-            T_align = torch.eye(4)
+            best_T = torch.eye(4, device=curr_depth.device, dtype=curr_depth.dtype)
+
+        T_align = best_T
 
         # Apply T_align to all extrinsics in curr_batch
         T_align_inv = invert_4x4(T_align)
