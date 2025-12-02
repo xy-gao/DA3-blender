@@ -71,86 +71,173 @@ def align_batches(all_predictions):
     
     # First batch is reference
     # all_predictions is list of (prediction, indices)
-    first_pred, _ = all_predictions[0]
+    first_pred, first_indices = all_predictions[0]
     aligned_predictions.append(first_pred)
     
     prev_pred = first_pred
+    prev_indices = first_indices
     
     for i in range(1, len(all_predictions)):
-        curr_pred_orig, _ = all_predictions[i]
+        curr_pred_orig, curr_indices = all_predictions[i]
         
         # Shallow copy to avoid modifying original
         import copy
         curr_pred = copy.copy(curr_pred_orig)
         
-        # Helper to ensure numpy
+        # Helper to ensure numpy/torch
+        def to_tensor(x):
+            if isinstance(x, np.ndarray):
+                return torch.from_numpy(x)
+            return x
+            
         def to_numpy(x):
-            import torch
             if isinstance(x, torch.Tensor):
                 return x.detach().cpu().float().numpy()
             return np.array(x)
 
-        curr_depth = to_numpy(curr_pred.depth)
-        curr_ext = to_numpy(curr_pred.extrinsics) # [N, 3, 4]
+        curr_depth = to_tensor(curr_pred.depth).float()
+        curr_ext = to_tensor(curr_pred.extrinsics).float() # [N, 3, 4]
+        curr_conf = to_tensor(curr_pred.conf).float()
         
-        prev_depth = to_numpy(prev_pred.depth)
-        prev_ext = to_numpy(prev_pred.extrinsics)
+        prev_depth = to_tensor(prev_pred.depth).float()
+        prev_ext = to_tensor(prev_pred.extrinsics).float()
+        prev_conf = to_tensor(prev_pred.conf).float()
         
-        # Overlap: last of prev, first of curr
-        prev_overlap_depth = prev_depth[-1]
-        curr_overlap_depth = curr_depth[0]
+        # Find overlapping indices
+        common_indices = set(prev_indices) & set(curr_indices)
+        if not common_indices:
+            print(f"Warning: Batch {i} has no overlap with Batch {i-1}. Alignment may be poor.")
+            aligned_predictions.append(curr_pred)
+            prev_pred = curr_pred
+            prev_indices = curr_indices
+            continue
+            
+        # Sort common indices to ensure deterministic order
+        common_indices = sorted(list(common_indices))
         
-        prev_overlap_ext = prev_ext[-1]
-        curr_overlap_ext = curr_ext[0]
+        # Collect valid pixels for depth scaling
+        valid_prev_depths = []
+        valid_curr_depths = []
         
-        # Compute scale
-        prev_mean = float(prev_overlap_depth.mean())
-        curr_mean = float(curr_overlap_depth.mean())
-        scale = prev_mean / curr_mean if curr_mean > 1e-6 else 1.0
+        # Collect transforms for extrinsic alignment
+        transforms = []
         
-        # Scale depth
-        curr_pred.depth = curr_depth * scale
-        
-        # Align extrinsics
-        def extrinsic_to_4x4(ext_3x4):
-            R = ext_3x4[:, :3]
-            t = ext_3x4[:, 3]
-            T = np.eye(4, dtype=np.float32)
-            T[:3, :3] = R
-            T[:3, 3] = t
-            return T
+        for global_idx in common_indices:
+            # Find local index in prev and curr
+            idx_prev = prev_indices.index(global_idx)
+            idx_curr = curr_indices.index(global_idx)
+            
+            d_prev = prev_depth[idx_prev]
+            d_curr = curr_depth[idx_curr]
+            c_prev = prev_conf[idx_prev]
+            
+            # Compute non_sky_mask
+            non_sky_mask = torch.ones_like(d_prev, dtype=torch.bool)
+            if hasattr(prev_pred, 'sky') and prev_pred.sky is not None:
+                 non_sky_mask = non_sky_mask & compute_sky_mask(to_tensor(prev_pred.sky)[idx_prev], threshold=0.3)
+            if hasattr(curr_pred, 'sky') and curr_pred.sky is not None:
+                 non_sky_mask = non_sky_mask & compute_sky_mask(to_tensor(curr_pred.sky)[idx_curr], threshold=0.3)
+            
+            # Use compute_alignment_mask for robust pixel selection
+            # Ensure inputs are at least 3D [1, H, W] for the utils
+            d_prev_3d = d_prev.unsqueeze(0)
+            d_curr_3d = d_curr.unsqueeze(0)
+            c_prev_3d = c_prev.unsqueeze(0)
+            non_sky_mask_3d = non_sky_mask.unsqueeze(0)
+            
+            c_prev_ns = c_prev[non_sky_mask]
+            if c_prev_ns.numel() > 0:
+                c_prev_sampled = sample_tensor_for_quantile(c_prev_ns, max_samples=100000)
+                median_conf = torch.quantile(c_prev_sampled, 0.5)
+                
+                mask_3d = compute_alignment_mask(
+                    c_prev_3d, non_sky_mask_3d, d_prev_3d, d_curr_3d, median_conf
+                )
+                mask = mask_3d.squeeze(0)
+            else:
+                mask = non_sky_mask
 
-        def invert_4x4(T_4x4):
-            R = T_4x4[:3, :3]
-            t = T_4x4[:3, 3]
-            T_inv = np.eye(4, dtype=np.float32)
+            if mask.sum() > 10:
+                valid_prev_depths.append(d_prev[mask])
+                valid_curr_depths.append(d_curr[mask])
+            
+            def extrinsic_to_4x4(ext_3x4):
+                if ext_3x4.shape == (3, 4):
+                    last_row = torch.tensor([0, 0, 0, 1], device=ext_3x4.device, dtype=ext_3x4.dtype)
+                    return torch.cat([ext_3x4, last_row.unsqueeze(0)], dim=0)
+                return ext_3x4
+
+            E_prev = extrinsic_to_4x4(prev_ext[idx_prev])
+            E_curr = extrinsic_to_4x4(curr_ext[idx_curr])
+            
+            transforms.append((E_prev, E_curr))
+
+        # Compute global scale factor
+        if valid_prev_depths:
+            all_prev = torch.cat(valid_prev_depths)
+            all_curr = torch.cat(valid_curr_depths)
+            scale = least_squares_scale_scalar(all_curr, all_prev)
+        else:
+            scale = torch.tensor(1.0)
+            
+        scale_val = float(scale.item())
+        print(f"Batch {i} alignment: scale={scale_val}")
+        
+        # Apply scale to current depth
+        curr_pred.depth = to_numpy(curr_depth * scale)
+        
+        # Compute rigid transform
+        def invert_4x4(T):
+            R = T[:3, :3]
+            t = T[:3, 3]
+            T_inv = torch.eye(4, device=T.device, dtype=T.dtype)
             T_inv[:3, :3] = R.T
             T_inv[:3, 3] = -R.T @ t
             return T_inv
 
-        Ec_curr = extrinsic_to_4x4(curr_overlap_ext)
-        Ec_prev = extrinsic_to_4x4(prev_overlap_ext)
-        Cc_curr = invert_4x4(Ec_curr)
-        Cc_prev = invert_4x4(Ec_prev)
+        ts = []
+        Rs = []
         
-        Cc_curr_scaled = Cc_curr.copy()
-        Cc_curr_scaled[:3, 3] *= scale
-        
-        T_align = Cc_prev @ invert_4x4(Cc_curr_scaled)
+        for E_prev, E_curr in transforms:
+            # Scale E_curr translation
+            E_curr_scaled = E_curr.clone()
+            E_curr_scaled[:3, 3] *= scale
+            
+            # T = E_prev^-1 @ E_curr_scaled
+            T = invert_4x4(E_prev) @ E_curr_scaled
+            ts.append(T[:3, 3])
+            Rs.append(T[:3, :3])
+            
+        # Average translation and rotation
+        if ts:
+            avg_t = torch.stack(ts).mean(dim=0)
+            
+            avg_R_raw = torch.stack(Rs).mean(dim=0)
+            U, S, V = torch.svd(avg_R_raw)
+            avg_R = U @ V.T
+            
+            T_align = torch.eye(4, device=avg_t.device, dtype=avg_t.dtype)
+            T_align[:3, :3] = avg_R
+            T_align[:3, 3] = avg_t
+        else:
+            T_align = torch.eye(4)
+
+        # Apply T_align to all extrinsics in curr_batch
+        T_align_inv = invert_4x4(T_align)
         
         new_extrinsics = []
         for ext_3x4 in curr_ext:
-            Ec = extrinsic_to_4x4(ext_3x4)
-            Cc = invert_4x4(Ec)
-            Cc[:3, 3] *= scale
-            Cc_aligned = T_align @ Cc
-            Ec_aligned = invert_4x4(Cc_aligned)
-            new_extrinsics.append(Ec_aligned[:3, :4])
+            E_curr_scaled = extrinsic_to_4x4(ext_3x4)
+            E_curr_scaled[:3, 3] *= scale
             
-        curr_pred.extrinsics = np.array(new_extrinsics)
+            E_new = E_curr_scaled @ T_align_inv
+            new_extrinsics.append(E_new[:3, :4])
+            
+        curr_pred.extrinsics = to_numpy(torch.stack(new_extrinsics))
         
         aligned_predictions.append(curr_pred)
         prev_pred = curr_pred
+        prev_indices = curr_indices
         
     return aligned_predictions
 
@@ -402,9 +489,22 @@ def combine_base_and_metric(base, metric):
     non_sky_mask = compute_sky_mask(sky, threshold=0.3)
     assert non_sky_mask.sum() > 10, "Insufficient non-sky pixels for alignment"
 
-    # Align using all non-sky pixels directly (no depth_conf / align_mask)
-    valid_depth = depth[non_sky_mask]           # 1D
-    valid_metric_depth = metric_depth[non_sky_mask]  # 1D
+    # Align using compute_alignment_mask logic from da3.py
+    # output.conf is the depth confidence
+    
+    # Sample depth confidence for quantile computation
+    depth_conf_ns = output.conf[non_sky_mask]
+    depth_conf_sampled = sample_tensor_for_quantile(depth_conf_ns, max_samples=100000)
+    median_conf = torch.quantile(depth_conf_sampled, 0.5)
+
+    # Compute alignment mask
+    align_mask = compute_alignment_mask(
+        output.conf, non_sky_mask, depth, metric_depth, median_conf
+    )
+
+    # Compute scale factor using least squares on aligned pixels
+    valid_depth = depth[align_mask]
+    valid_metric_depth = metric_depth[align_mask]
 
     scale_factor = least_squares_scale_scalar(valid_metric_depth, valid_depth)
 
@@ -492,8 +592,17 @@ def combine_base_with_metric_depth(base, metric):
         raise ValueError("Insufficient non-sky pixels for metric depth sky handling")
 
     # Compute global scale factor aligning base depth to metric depth
-    valid_base = base_depth[non_sky_mask]
-    valid_metric = metric_depth[non_sky_mask]
+    # Use robust alignment mask
+    depth_conf_ns = output.conf[non_sky_mask]
+    depth_conf_sampled = sample_tensor_for_quantile(depth_conf_ns, max_samples=100000)
+    median_conf = torch.quantile(depth_conf_sampled, 0.5)
+
+    align_mask = compute_alignment_mask(
+        output.conf, non_sky_mask, base_depth, metric_depth, median_conf
+    )
+
+    valid_base = base_depth[align_mask]
+    valid_metric = metric_depth[align_mask]
     scale_factor = least_squares_scale_scalar(valid_metric, valid_base)
 
     # Use metric depth as final depth (in metres)

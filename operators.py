@@ -206,26 +206,28 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         prediction = run_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
                         all_base_predictions.append((prediction, batch_indices))
                 else:
-                    # New scheme: [prev_first_new, prev_last_new] + N new frames
+                    # New scheme: (0..9) (0, 9, 10..17) (10, 17, 18..25)
                     N = len(image_paths)
                     if batch_size < 3:
                         step = 1
                     else:
                         step = batch_size - 2
 
-                    # First batch: just the first batch_size frames
+                    # First batch
                     start = 0
                     end = min(batch_size, N)
                     batch_indices = list(range(start, end))
-                    num_batches = 1
+                    current_new_indices = batch_indices
+                    
                     remaining_start = end
-                    # Rough upper bound for logging
+                    
                     if step > 0:
                         num_batches = 1 + max(0, (N - end + step - 1) // step)
+                    else:
+                        num_batches = (N + batch_size - 1) // batch_size
 
                     batch_idx = 0
                     while True:
-                        # Build batch paths from indices
                         batch_paths = [image_paths[i] for i in batch_indices]
                         print(f"Batch {batch_idx + 1}/{num_batches}:")
                         prediction = run_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
@@ -234,15 +236,19 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         if remaining_start >= N:
                             break
 
-                        # Define new first/last from current batch (its first and last new frames)
-                        first_new = batch_indices[0]
-                        last_new = batch_indices[-1]
+                        # Determine overlap frames from the "new" frames of the current batch
+                        overlap_indices = [current_new_indices[0], current_new_indices[-1]]
+                        # Remove duplicates if any (e.g. if only 1 new frame)
+                        if overlap_indices[0] == overlap_indices[1]:
+                            overlap_indices = [overlap_indices[0]]
 
-                        # Next batch indices: [first_new, last_new] + next unseen indices
-                        next_indices = list(range(remaining_start, min(remaining_start + step, N)))
-                        batch_indices = [first_new, last_new] + next_indices
-
-                        remaining_start += len(next_indices)
+                        next_end = min(remaining_start + step, N)
+                        next_new_indices = list(range(remaining_start, next_end))
+                        
+                        batch_indices = overlap_indices + next_new_indices
+                        current_new_indices = next_new_indices
+                        
+                        remaining_start = next_end
                         batch_idx += 1
             else:
                 prediction = run_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
@@ -290,10 +296,14 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                             start = 0
                             end = min(batch_size, N)
                             batch_indices = list(range(start, end))
-                            num_batches = 1
+                            current_new_indices = batch_indices
+                            
                             remaining_start = end
+                            
                             if step > 0:
                                 num_batches = 1 + max(0, (N - end + step - 1) // step)
+                            else:
+                                num_batches = (N + batch_size - 1) // batch_size
 
                             batch_idx = 0
                             while True:
@@ -305,12 +315,17 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                                 if remaining_start >= N:
                                     break
 
-                                first_new = batch_indices[0]
-                                last_new = batch_indices[-1]
-                                next_indices = list(range(remaining_start, min(remaining_start + step, N)))
-                                batch_indices = [first_new, last_new] + next_indices
+                                overlap_indices = [current_new_indices[0], current_new_indices[-1]]
+                                if overlap_indices[0] == overlap_indices[1]:
+                                    overlap_indices = [overlap_indices[0]]
 
-                                remaining_start += len(next_indices)
+                                next_end = min(remaining_start + step, N)
+                                next_new_indices = list(range(remaining_start, next_end))
+                                
+                                batch_indices = overlap_indices + next_new_indices
+                                current_new_indices = next_new_indices
+                                
+                                remaining_start = next_end
                                 batch_idx += 1
                     else:
                         prediction = run_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
