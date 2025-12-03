@@ -505,31 +505,7 @@ def import_point_cloud(d, collection=None):
     colors_batch = np.hstack((colors_batch, np.ones((colors_batch.shape[0], 1))))
     conf_batch = conf.reshape(-1)
     
-    # Pre-compute confidence colors (red -> green -> blue)
-    # Normalize confidence to 0-1 range for color mapping
-    conf_min = conf_batch.min()
-    conf_max = conf_batch.max()
-    print(f"DEBUG confidence: min={conf_min:.4f}, max={conf_max:.4f}")
-    if conf_max > conf_min:
-        conf_normalized = (conf_batch - conf_min) / (conf_max - conf_min)
-    else:
-        conf_normalized = np.zeros_like(conf_batch)
-    
-    # Map to RGB: red (0) -> green (0.5) -> blue (1)
-    conf_colors = np.zeros((len(conf_batch), 4), dtype=np.float32)
-    conf_colors[:, 3] = 1.0  # Alpha
-    # Red to green (0 to 0.5)
-    mask_low = conf_normalized <= 0.5
-    t_low = conf_normalized[mask_low] * 2  # 0 to 1
-    conf_colors[mask_low, 0] = 1.0 - t_low  # R: 1 -> 0
-    conf_colors[mask_low, 1] = t_low        # G: 0 -> 1
-    conf_colors[mask_low, 2] = 0.0          # B: 0
-    # Green to blue (0.5 to 1)
-    mask_high = conf_normalized > 0.5
-    t_high = (conf_normalized[mask_high] - 0.5) * 2  # 0 to 1
-    conf_colors[mask_high, 0] = 0.0              # R: 0
-    conf_colors[mask_high, 1] = 1.0 - t_high     # G: 1 -> 0
-    conf_colors[mask_high, 2] = t_high           # B: 0 -> 1
+    print(f"DEBUG confidence: min={conf_batch.min():.4f}, max={conf_batch.max():.4f}")
     
     mesh = bpy.data.meshes.new(name="Points")
     vertices = points_batch.tolist()
@@ -539,11 +515,6 @@ def import_point_cloud(d, collection=None):
     attribute = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
     color_values = colors_batch.flatten().tolist()
     attribute.data.foreach_set("color", color_values)
-    
-    # Confidence colors (pre-computed)
-    attribute_conf_color = mesh.attributes.new(name="conf_color", type="FLOAT_COLOR", domain="POINT")
-    conf_color_values = conf_colors.flatten().tolist()
-    attribute_conf_color.data.foreach_set("color", conf_color_values)
     
     # Raw confidence value
     attribute_conf = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
@@ -572,28 +543,58 @@ def import_point_cloud(d, collection=None):
     # Image color attribute
     attr_node = nodes.new('ShaderNodeAttribute')
     attr_node.attribute_name = "point_color"
-    attr_node.location = (-400, 200)
+    attr_node.location = (-600, 200)
     
-    # Confidence color attribute (pre-computed)
-    conf_color_attr = nodes.new('ShaderNodeAttribute')
-    conf_color_attr.attribute_name = "conf_color"
-    conf_color_attr.location = (-400, -100)
+    # Confidence attribute (raw values)
+    conf_attr_node = nodes.new('ShaderNodeAttribute')
+    conf_attr_node.attribute_name = "conf"
+    conf_attr_node.location = (-600, -200)
+    
+    # Map Range: 0-10 -> 0-1 (so conf values map to reasonable ramp positions)
+    map_range = nodes.new('ShaderNodeMapRange')
+    map_range.location = (-400, -200)
+    map_range.clamp = True
+    map_range.inputs['From Min'].default_value = 0.0
+    map_range.inputs['From Max'].default_value = 10.0
+    map_range.inputs['To Min'].default_value = 0.0
+    map_range.inputs['To Max'].default_value = 1.0
+    
+    # Color Ramp: red (low) -> green (mid) -> blue (high)
+    # Positions: 0.2 = conf 2, 0.5 = conf 5, 0.6 = conf 6
+    color_ramp = nodes.new('ShaderNodeValToRGB')
+    color_ramp.location = (-150, -200)
+    # Clear default elements and set up: red at 0, green at 0.5-0.6, blue at 1
+    ramp = color_ramp.color_ramp
+    ramp.elements[0].position = 0.0
+    ramp.elements[0].color = (1, 0, 0, 1)  # Red (conf < 2)
+    ramp.elements[1].position = 0.2
+    ramp.elements[1].color = (1, 0, 0, 1)  # Still red at conf=2
+    # Add green zone
+    green_start = ramp.elements.new(0.5)
+    green_start.color = (0, 1, 0, 1)  # Green at conf=5
+    green_end = ramp.elements.new(0.6)
+    green_end.color = (0, 1, 0, 1)  # Green at conf=6
+    # Add blue
+    blue_elem = ramp.elements.new(1.0)
+    blue_elem.color = (0, 0, 1, 1)  # Blue at conf=10
     
     # Mix shader to switch between image color and confidence color
     mix_node = nodes.new('ShaderNodeMix')
     mix_node.data_type = 'RGBA'
-    mix_node.location = (-100, 100)
+    mix_node.location = (100, 100)
     mix_node.inputs['Factor'].default_value = 0.0  # 0 = image color, 1 = confidence color
     
     bsdf = nodes.new('ShaderNodeBsdfPrincipled')
-    bsdf.location = (200, 100)
+    bsdf.location = (300, 100)
     
     output_node_material = nodes.new('ShaderNodeOutputMaterial')
-    output_node_material.location = (500, 100)
+    output_node_material.location = (550, 100)
     
     # Connect nodes
+    links.new(conf_attr_node.outputs['Fac'], map_range.inputs['Value'])
+    links.new(map_range.outputs['Result'], color_ramp.inputs['Fac'])
     links.new(attr_node.outputs['Color'], mix_node.inputs['A'])
-    links.new(conf_color_attr.outputs['Color'], mix_node.inputs['B'])
+    links.new(color_ramp.outputs['Color'], mix_node.inputs['B'])
     links.new(mix_node.outputs['Result'], bsdf.inputs['Base Color'])
     links.new(bsdf.outputs['BSDF'], output_node_material.inputs['Surface'])
     
