@@ -522,9 +522,6 @@ def import_point_cloud(d, collection=None):
     attribute_conf.data.foreach_set("value", conf_values)
     
     obj = bpy.data.objects.new("Points", mesh)
-    
-    # Add custom property for show_confidence
-    obj["show_confidence"] = 0.0
 
     # Link to the provided collection, or fallback to active collection
     if collection is not None:
@@ -532,82 +529,76 @@ def import_point_cloud(d, collection=None):
     else:
         bpy.context.collection.objects.link(obj)
 
-    # Create material with both image color and confidence color options
-    mat = bpy.data.materials.new(name="PointMaterial")
-    mat.use_nodes = True
-    nodes = mat.node_tree.nodes
-    links = mat.node_tree.links
-    for node in nodes:
-        nodes.remove(node)
+    # Reuse existing PointMaterial or create new one
+    mat = bpy.data.materials.get("PointMaterial")
+    if mat is None:
+        mat = bpy.data.materials.new(name="PointMaterial")
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        for node in nodes:
+            nodes.remove(node)
+        
+        # Image color attribute
+        attr_node = nodes.new('ShaderNodeAttribute')
+        attr_node.attribute_name = "point_color"
+        attr_node.location = (-600, 200)
+        
+        # Confidence attribute (raw values)
+        conf_attr_node = nodes.new('ShaderNodeAttribute')
+        conf_attr_node.attribute_name = "conf"
+        conf_attr_node.location = (-600, -200)
+        
+        # Map Range: 0-10 -> 0-1 (so conf values map to reasonable ramp positions)
+        map_range = nodes.new('ShaderNodeMapRange')
+        map_range.location = (-400, -200)
+        map_range.clamp = True
+        map_range.inputs['From Min'].default_value = 0.0
+        map_range.inputs['From Max'].default_value = 10.0
+        map_range.inputs['To Min'].default_value = 0.0
+        map_range.inputs['To Max'].default_value = 1.0
+        
+        # Color Ramp: red (low) -> green (mid) -> blue (high)
+        # Positions: 0.2 = conf 2, 0.5 = conf 5, 0.6 = conf 6
+        color_ramp = nodes.new('ShaderNodeValToRGB')
+        color_ramp.location = (-150, -200)
+        # Clear default elements and set up: red at 0, green at 0.5-0.6, blue at 1
+        ramp = color_ramp.color_ramp
+        ramp.elements[0].position = 0.0
+        ramp.elements[0].color = (1, 0, 0, 1)  # Red (conf < 2)
+        ramp.elements[1].position = 0.2
+        ramp.elements[1].color = (1, 0, 0, 1)  # Still red at conf=2
+        # Add green zone
+        green_start = ramp.elements.new(0.5)
+        green_start.color = (0, 1, 0, 1)  # Green at conf=5
+        green_end = ramp.elements.new(0.6)
+        green_end.color = (0, 1, 0, 1)  # Green at conf=6
+        # Add blue
+        blue_elem = ramp.elements.new(1.0)
+        blue_elem.color = (0, 0, 1, 1)  # Blue at conf=10
+        
+        # Mix shader to switch between image color and confidence color
+        mix_node = nodes.new('ShaderNodeMix')
+        mix_node.data_type = 'RGBA'
+        mix_node.location = (100, 100)
+        mix_node.inputs['Factor'].default_value = 0.0  # 0 = image color, 1 = confidence color
+        
+        bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+        bsdf.location = (300, 100)
+        
+        output_node_material = nodes.new('ShaderNodeOutputMaterial')
+        output_node_material.location = (550, 100)
+        
+        # Connect nodes
+        links.new(conf_attr_node.outputs['Fac'], map_range.inputs['Value'])
+        links.new(map_range.outputs['Result'], color_ramp.inputs['Fac'])
+        links.new(attr_node.outputs['Color'], mix_node.inputs['A'])
+        links.new(color_ramp.outputs['Color'], mix_node.inputs['B'])
+        links.new(mix_node.outputs['Result'], bsdf.inputs['Base Color'])
+        links.new(bsdf.outputs['BSDF'], output_node_material.inputs['Surface'])
     
-    # Image color attribute
-    attr_node = nodes.new('ShaderNodeAttribute')
-    attr_node.attribute_name = "point_color"
-    attr_node.location = (-600, 200)
-    
-    # Confidence attribute (raw values)
-    conf_attr_node = nodes.new('ShaderNodeAttribute')
-    conf_attr_node.attribute_name = "conf"
-    conf_attr_node.location = (-600, -200)
-    
-    # Map Range: 0-10 -> 0-1 (so conf values map to reasonable ramp positions)
-    map_range = nodes.new('ShaderNodeMapRange')
-    map_range.location = (-400, -200)
-    map_range.clamp = True
-    map_range.inputs['From Min'].default_value = 0.0
-    map_range.inputs['From Max'].default_value = 10.0
-    map_range.inputs['To Min'].default_value = 0.0
-    map_range.inputs['To Max'].default_value = 1.0
-    
-    # Color Ramp: red (low) -> green (mid) -> blue (high)
-    # Positions: 0.2 = conf 2, 0.5 = conf 5, 0.6 = conf 6
-    color_ramp = nodes.new('ShaderNodeValToRGB')
-    color_ramp.location = (-150, -200)
-    # Clear default elements and set up: red at 0, green at 0.5-0.6, blue at 1
-    ramp = color_ramp.color_ramp
-    ramp.elements[0].position = 0.0
-    ramp.elements[0].color = (1, 0, 0, 1)  # Red (conf < 2)
-    ramp.elements[1].position = 0.2
-    ramp.elements[1].color = (1, 0, 0, 1)  # Still red at conf=2
-    # Add green zone
-    green_start = ramp.elements.new(0.5)
-    green_start.color = (0, 1, 0, 1)  # Green at conf=5
-    green_end = ramp.elements.new(0.6)
-    green_end.color = (0, 1, 0, 1)  # Green at conf=6
-    # Add blue
-    blue_elem = ramp.elements.new(1.0)
-    blue_elem.color = (0, 0, 1, 1)  # Blue at conf=10
-    
-    # Mix shader to switch between image color and confidence color
-    mix_node = nodes.new('ShaderNodeMix')
-    mix_node.data_type = 'RGBA'
-    mix_node.location = (100, 100)
-    mix_node.inputs['Factor'].default_value = 0.0  # 0 = image color, 1 = confidence color
-    
-    bsdf = nodes.new('ShaderNodeBsdfPrincipled')
-    bsdf.location = (300, 100)
-    
-    output_node_material = nodes.new('ShaderNodeOutputMaterial')
-    output_node_material.location = (550, 100)
-    
-    # Connect nodes
-    links.new(conf_attr_node.outputs['Fac'], map_range.inputs['Value'])
-    links.new(map_range.outputs['Result'], color_ramp.inputs['Fac'])
-    links.new(attr_node.outputs['Color'], mix_node.inputs['A'])
-    links.new(color_ramp.outputs['Color'], mix_node.inputs['B'])
-    links.new(mix_node.outputs['Result'], bsdf.inputs['Base Color'])
-    links.new(bsdf.outputs['BSDF'], output_node_material.inputs['Surface'])
-    
-    # Set up driver from object property to material mix factor
-    fcurve = mix_node.inputs['Factor'].driver_add('default_value')
-    driver = fcurve.driver
-    driver.type = 'AVERAGE'
-    var = driver.variables.new()
-    var.name = 'show_conf'
-    var.type = 'SINGLE_PROP'
-    var.targets[0].id_type = 'OBJECT'
-    var.targets[0].id = obj
-    var.targets[0].data_path = '["show_confidence"]'
+    # Add material to object so it shows up in Shading mode
+    obj.data.materials.append(mat)
     
     # Geometry nodes setup
     geo_mod = obj.modifiers.new(name="GeometryNodes", type='NODES')
