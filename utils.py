@@ -104,20 +104,24 @@ def _invert_4x4_numpy(T_4x4):
     T_inv[:3, 3] = -R.T @ t
     return T_inv
 
+# Transform and scale each batch to align with previous batch
+# all_predictions is list of (prediction_for_batch, frame_indices_for_batch)
+# prediction_for_batch is the result returned by run_model, and is class depth_anything_3.specs.Prediction
+# and has these fields: ['depth', 'is_metric', 'sky', 'conf', 'extrinsics', 'intrinsics', 'processed_images', 'gaussians', 'aux', 'scale_factor']
 def align_batches(all_predictions):
     if not all_predictions:
         return []
 
+    # result, a list of predictions with aligned extrinsics and depths
     aligned_predictions = []
     
-    # First batch is reference
-    # all_predictions is list of (prediction, indices)
+    # First batch doesn't need aligning
     first_pred, first_indices = all_predictions[0]
     aligned_predictions.append(first_pred)
-    
     prev_pred = first_pred
     prev_indices = first_indices
     
+    # Loop through the rest of the batches
     for i in range(1, len(all_predictions)):
         curr_pred_orig, curr_indices = all_predictions[i]
         
@@ -125,12 +129,13 @@ def align_batches(all_predictions):
         import copy
         curr_pred = copy.copy(curr_pred_orig)
         
-        curr_depth = _to_tensor(curr_pred.depth).float()
-        curr_ext = _to_tensor(curr_pred.extrinsics)
+        curr_depth = _to_tensor(curr_pred.depth).float() # depth of every pixel in every image in the batch
+        curr_conf = _to_tensor(curr_pred.conf).float() # confidence of depth of every pixel in every image in the batch, range 0 to more than 1
+        curr_ext = _to_tensor(curr_pred.extrinsics) # camera position and rotation for every image in the batch (or None for Metric/Mono model)
         if curr_ext is not None:
             curr_ext = curr_ext.float()
-        curr_conf = _to_tensor(curr_pred.conf).float()
         
+        # Alignment for Metric/Mono model is not supported yet. TODO: still align the depth based on overlap images
         if curr_ext is None:
             print(f"Batch {i} has no extrinsics, skipping alignment.")
             aligned_predictions.append(curr_pred)
@@ -138,9 +143,10 @@ def align_batches(all_predictions):
             prev_indices = curr_indices
             continue
 
+        # depths, depth confidences, and camera poses for all images in the previous batch
         prev_depth = _to_tensor(prev_pred.depth).float()
-        prev_ext = _to_tensor(prev_pred.extrinsics).float()
         prev_conf = _to_tensor(prev_pred.conf).float()
+        prev_ext = _to_tensor(prev_pred.extrinsics).float()
         
         # Find overlapping indices
         common_indices = set(prev_indices) & set(curr_indices)
@@ -160,18 +166,21 @@ def align_batches(all_predictions):
         
         # Collect transforms for extrinsic alignment
         transforms = []
-        
+
+        # for each overlapping frame
         for global_idx in common_indices:
             # Find local index in prev and curr
             idx_prev = prev_indices.index(global_idx)
             idx_curr = curr_indices.index(global_idx)
             
-            d_prev = prev_depth[idx_prev]
-            d_curr = curr_depth[idx_curr]
-            c_prev = prev_conf[idx_prev]
+            d_prev = prev_depth[idx_prev] # [H, W] depth of every pixel for this frame in the previous batch
+            d_curr = curr_depth[idx_curr] # [H, W] depth of every pixel for this frame in the current batch
+            c_prev = prev_conf[idx_prev]  # [H, W] confidence of every pixel for this frame in the previous batch
             
-            # Compute non_sky_mask
-            non_sky_mask = torch.ones_like(d_prev, dtype=torch.bool)
+            # We only want to calculate scale from pixels that aren't sky
+            # For Metric/Mono/Nested models use the returned sky mask
+            # For base models there is no sky mask, so assume all pixels are non-sky
+            non_sky_mask = torch.ones_like(d_prev, dtype=torch.bool) # [H, W]
             if hasattr(prev_pred, 'sky') and prev_pred.sky is not None:
                  non_sky_mask = non_sky_mask & compute_sky_mask(_to_tensor(prev_pred.sky)[idx_prev], threshold=0.3)
             if hasattr(curr_pred, 'sky') and curr_pred.sky is not None:
@@ -184,34 +193,37 @@ def align_batches(all_predictions):
             c_prev_3d = c_prev.unsqueeze(0)
             non_sky_mask_3d = non_sky_mask.unsqueeze(0)
             
-            c_prev_ns = c_prev[non_sky_mask]
+            c_prev_ns = c_prev[non_sky_mask] # [num_non_sky_pixels]
             if c_prev_ns.numel() > 0:
-                c_prev_sampled = sample_tensor_for_quantile(c_prev_ns, max_samples=100000)
-                median_conf = torch.quantile(c_prev_sampled, 0.5)
-                
+                c_prev_sampled = sample_tensor_for_quantile(c_prev_ns, max_samples=100000) # if there are more than 100,000 non-sky pixels, randomly select 100,000 of them
+                median_conf = torch.quantile(c_prev_sampled, 0.5) # calculate the median confidence (half the pixels have higher confidence than this, half have lower confidence)
+
+                # DA3 function, mask array is true for pixels that aren't sky and whose confidence is better than half the other non-sky pixels
                 mask_3d = compute_alignment_mask(
                     c_prev_3d, non_sky_mask_3d, d_prev_3d, d_curr_3d, median_conf
-                )
-                mask = mask_3d.squeeze(0)
+                ) # [1, H, W] boolean mask
+                mask = mask_3d.squeeze(0) # [H, W]
             else:
-                mask = non_sky_mask
+                mask = non_sky_mask # [H, W]
 
+            # make sure there are at least 11 valid pixels (ie. there were originally at least 22 non-sky pixels before we chose the best half)
             if mask.sum() > 10:
-                valid_prev_depths.append(d_prev[mask])
-                valid_curr_depths.append(d_curr[mask])
+                valid_prev_depths.append(d_prev[mask]) # [num_valid_pixels]
+                valid_curr_depths.append(d_curr[mask]) # [num_valid_pixels]
             
-            E_prev = _extrinsic_to_4x4_torch(prev_ext[idx_prev])
-            E_curr = _extrinsic_to_4x4_torch(curr_ext[idx_curr])
+            E_prev = _extrinsic_to_4x4_torch(prev_ext[idx_prev]) # 4x4 camera transform matrix for this frame in previous batch
+            E_curr = _extrinsic_to_4x4_torch(curr_ext[idx_curr]) # 4x4 camera transform matrix for this frame in current batch
             
             transforms.append((E_prev, E_curr))
 
+        # All overlap frames have now been processed
         # Compute global scale factor
         if valid_prev_depths:
-            all_prev = torch.cat(valid_prev_depths)
-            all_curr = torch.cat(valid_curr_depths)
-            scale = least_squares_scale_scalar(all_curr, all_prev)
+            all_prev = torch.cat(valid_prev_depths) # [total_valid_pixels]
+            all_curr = torch.cat(valid_curr_depths) # [total_valid_pixels]
+            scale = least_squares_scale_scalar(all_curr, all_prev) # [1], DA3 function, current batch depth / previous batch depth, with the least error squared
         else:
-            scale = torch.tensor(1.0)
+            scale = torch.tensor(1.0) # 1x scale if there were no overlap frames with at least 22 non-sky pixels
             
         scale_val = float(scale.item())
         print(f"Batch {i} alignment: scale={scale_val}")
@@ -225,13 +237,16 @@ def align_batches(all_predictions):
         # E_prev @ T @ P_world_curr = S @ E_curr @ P_world_curr
         # T = inv(E_prev) @ S @ E_curr
         
+        # 4x4 scaling matrix (based on all overlap frames combined)
         S = torch.eye(4, device=curr_depth.device, dtype=curr_depth.dtype)
         S[0, 0] = scale
         S[1, 1] = scale
         S[2, 2] = scale
         
+        # List of 4x4 transform matrices (one per valid overlap frame)
         candidate_Ts = []
         
+        # find transform matrix for each frame that undoes previous batch's transform then applies current batch's transform and scaling
         for E_prev, E_curr in transforms:
             # T = inv(E_prev) @ S @ E_curr
             # S @ E_curr scales the rotation and translation of E_curr
@@ -292,10 +307,12 @@ def align_batches(all_predictions):
             
         curr_pred.extrinsics = _to_numpy(torch.stack(new_extrinsics))
         
+        # Add the aligned prediction for this batch to the result list
         aligned_predictions.append(curr_pred)
         prev_pred = curr_pred
         prev_indices = curr_indices
         
+    # We've finished all batches, return a list of aligned predictions
     return aligned_predictions
 
 def combine_overlapping_predictions(all_predictions, full_image_paths):
