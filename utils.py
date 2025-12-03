@@ -230,88 +230,24 @@ def align_batches(all_predictions):
         scale_val = float(scale.item())
         print(f"Batch {i} alignment: scale={scale_val}")
         
-        # Apply scale to current depth
+        # Step 1: Scale depth and extrinsic translations together (like DA3 does)
+        # This handles all scaling in one place
         curr_pred.depth = _to_numpy(curr_depth * scale)
+        curr_ext[:, :, 3] = curr_ext[:, :, 3] * scale  # scale all translations
         
-        # Compute similarity transform T that maps P_world_curr to P_world_prev
-        # P_world_prev = T @ P_world_curr
-        # We derive T from: E_prev @ P_world_prev = s * E_curr @ P_world_curr
-        # E_prev @ T @ P_world_curr = S @ E_curr @ P_world_curr
-        # T = inv(E_prev) @ S @ E_curr
+        # Step 2: Compute rigid alignment transform from first overlap frame
+        # We want to find T such that: E_curr_scaled @ T ≈ E_prev
+        # Rearranging: T = inv(E_curr_scaled) @ E_prev
+        E_prev, E_curr_orig = transforms[0]
+        E_curr_scaled = _extrinsic_to_4x4_torch(curr_ext[curr_indices.index(common_indices[0])])
+        T_align = _invert_4x4_torch(E_curr_scaled) @ E_prev
         
-        # 4x4 scaling matrix (based on all overlap frames combined)
-        S = torch.eye(4, device=curr_depth.device, dtype=curr_depth.dtype)
-        S[0, 0] = scale
-        S[1, 1] = scale
-        S[2, 2] = scale
-        
-        # List of 4x4 rigid transform matrices (one per valid overlap frame)
-        # T is the rigid alignment that maps curr world coords to prev world coords
-        candidate_Ts = []
-        
-        # Find rigid transform for each overlap frame: T = inv(E_prev) @ E_curr
-        # This transforms points from curr batch's world frame to prev batch's world frame
-        for E_prev, E_curr in transforms:
-            # T = inv(E_prev) @ E_curr (rigid alignment, no scaling here)
-            T = _invert_4x4_torch(E_prev) @ E_curr
-            candidate_Ts.append(T)
-            
-        # Select best T (minimize error across all overlapping frames)
-        best_T = None
-        min_error = float('inf')
-        
-        if len(candidate_Ts) == 1:
-            best_T = candidate_Ts[0]
-        elif len(candidate_Ts) > 1:
-            for idx, T_cand in enumerate(candidate_Ts):
-                error = 0.0
-                T_cand_inv = _invert_4x4_torch(T_cand)
-                
-                for E_prev, E_curr in transforms:
-                    # Check consistency: after applying T, E_curr should align with E_prev
-                    # E_aligned = E_curr @ inv(T)
-                    # We compare E_aligned with E_prev (before scaling)
-                    
-                    E_aligned = E_curr @ T_cand_inv
-                    
-                    # Error = distance between aligned translation and E_prev translation
-                    dist = torch.norm(E_aligned[:3, 3] - E_prev[:3, 3]).item()
-                    error += dist
-                
-                print(f"  Candidate {idx} error: {error:.4f}")
-                if error < min_error:
-                    min_error = error
-                    best_T = T_cand
-            
-            print(f"Batch {i} alignment: Best T error = {min_error:.4f} (selected from {len(candidate_Ts)} candidates)")
-        else:
-            best_T = torch.eye(4, device=curr_depth.device, dtype=curr_depth.dtype)
-            # If no overlap, we still need to apply scale to extrinsics?
-            # If we just scale depth, we should scale extrinsics translation too.
-            # T = S (pure scaling)
-            best_T = S
-
-        T_align = best_T
-        T_align_inv = _invert_4x4_torch(T_align)
-
-        # Apply alignment and scaling to all extrinsics in curr_batch
-        # 1. First align: E_aligned = E_curr @ inv(T) - transforms to prev batch's world frame
-        # 2. Then scale translation: the camera positions need to be scaled by S
-        #    to match the scaled depths
-        
+        # Step 3: Apply rigid alignment to all extrinsics
+        # E_new = E_curr_scaled @ T
         new_extrinsics = []
         for ext_3x4 in curr_ext:
             E_curr = _extrinsic_to_4x4_torch(ext_3x4)
-            
-            # Align to previous batch's world frame
-            E_aligned = E_curr @ T_align_inv
-            
-            # Scale the translation (camera position) to match scaled depths
-            # E is world-to-camera, so we need to scale the translation appropriately
-            # For world-to-camera: t_new = s * t (scale camera position in world)
-            E_new = E_aligned.clone()
-            E_new[:3, 3] = E_aligned[:3, 3] * scale
-            
+            E_new = E_curr @ T_align
             new_extrinsics.append(E_new[:3, :4])
             
         curr_pred.extrinsics = _to_numpy(torch.stack(new_extrinsics))
