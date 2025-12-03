@@ -221,7 +221,9 @@ def align_batches(all_predictions):
         if valid_prev_depths:
             all_prev = torch.cat(valid_prev_depths) # [total_valid_pixels]
             all_curr = torch.cat(valid_curr_depths) # [total_valid_pixels]
-            scale = least_squares_scale_scalar(all_curr, all_prev) # [1], DA3 function, current batch depth / previous batch depth, with the least error squared
+            # least_squares_scale_scalar(target, source) returns scale such that source * scale ≈ target
+            # We want curr_depth * scale ≈ prev_depth, so target=all_prev, source=all_curr
+            scale = least_squares_scale_scalar(all_prev, all_curr)
         else:
             scale = torch.tensor(1.0) # 1x scale if there were no overlap frames with at least 22 non-sky pixels
             
