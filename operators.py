@@ -10,7 +10,6 @@ from .utils import (
     combine_base_with_metric_depth,
     import_point_cloud,
     create_cameras,
-    combine_overlapping_predictions,
     align_batches,
 )
 
