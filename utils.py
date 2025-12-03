@@ -504,16 +504,56 @@ def import_point_cloud(d, collection=None):
     colors_batch = images.reshape(-1, 3)
     colors_batch = np.hstack((colors_batch, np.ones((colors_batch.shape[0], 1))))
     conf_batch = conf.reshape(-1)
+    
+    # Pre-compute confidence colors (red -> green -> blue)
+    # Normalize confidence to 0-1 range for color mapping
+    conf_min = conf_batch.min()
+    conf_max = conf_batch.max()
+    print(f"DEBUG confidence: min={conf_min:.4f}, max={conf_max:.4f}")
+    if conf_max > conf_min:
+        conf_normalized = (conf_batch - conf_min) / (conf_max - conf_min)
+    else:
+        conf_normalized = np.zeros_like(conf_batch)
+    
+    # Map to RGB: red (0) -> green (0.5) -> blue (1)
+    conf_colors = np.zeros((len(conf_batch), 4), dtype=np.float32)
+    conf_colors[:, 3] = 1.0  # Alpha
+    # Red to green (0 to 0.5)
+    mask_low = conf_normalized <= 0.5
+    t_low = conf_normalized[mask_low] * 2  # 0 to 1
+    conf_colors[mask_low, 0] = 1.0 - t_low  # R: 1 -> 0
+    conf_colors[mask_low, 1] = t_low        # G: 0 -> 1
+    conf_colors[mask_low, 2] = 0.0          # B: 0
+    # Green to blue (0.5 to 1)
+    mask_high = conf_normalized > 0.5
+    t_high = (conf_normalized[mask_high] - 0.5) * 2  # 0 to 1
+    conf_colors[mask_high, 0] = 0.0              # R: 0
+    conf_colors[mask_high, 1] = 1.0 - t_high     # G: 1 -> 0
+    conf_colors[mask_high, 2] = t_high           # B: 0 -> 1
+    
     mesh = bpy.data.meshes.new(name="Points")
     vertices = points_batch.tolist()
     mesh.from_pydata(vertices, [], [])
+    
+    # Image colors
     attribute = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
     color_values = colors_batch.flatten().tolist()
     attribute.data.foreach_set("color", color_values)
+    
+    # Confidence colors (pre-computed)
+    attribute_conf_color = mesh.attributes.new(name="conf_color", type="FLOAT_COLOR", domain="POINT")
+    conf_color_values = conf_colors.flatten().tolist()
+    attribute_conf_color.data.foreach_set("color", conf_color_values)
+    
+    # Raw confidence value
     attribute_conf = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
     conf_values = conf_batch.tolist()
     attribute_conf.data.foreach_set("value", conf_values)
+    
     obj = bpy.data.objects.new("Points", mesh)
+    
+    # Add custom property for show_confidence
+    obj["show_confidence"] = 0.0
 
     # Link to the provided collection, or fallback to active collection
     if collection is not None:
@@ -521,18 +561,54 @@ def import_point_cloud(d, collection=None):
     else:
         bpy.context.collection.objects.link(obj)
 
+    # Create material with both image color and confidence color options
     mat = bpy.data.materials.new(name="PointMaterial")
     mat.use_nodes = True
     nodes = mat.node_tree.nodes
     links = mat.node_tree.links
     for node in nodes:
         nodes.remove(node)
+    
+    # Image color attribute
     attr_node = nodes.new('ShaderNodeAttribute')
     attr_node.attribute_name = "point_color"
+    attr_node.location = (-400, 200)
+    
+    # Confidence color attribute (pre-computed)
+    conf_color_attr = nodes.new('ShaderNodeAttribute')
+    conf_color_attr.attribute_name = "conf_color"
+    conf_color_attr.location = (-400, -100)
+    
+    # Mix shader to switch between image color and confidence color
+    mix_node = nodes.new('ShaderNodeMix')
+    mix_node.data_type = 'RGBA'
+    mix_node.location = (-100, 100)
+    mix_node.inputs['Factor'].default_value = 0.0  # 0 = image color, 1 = confidence color
+    
     bsdf = nodes.new('ShaderNodeBsdfPrincipled')
-    links.new(attr_node.outputs['Color'], bsdf.inputs['Base Color'])
+    bsdf.location = (200, 100)
+    
     output_node_material = nodes.new('ShaderNodeOutputMaterial')
+    output_node_material.location = (500, 100)
+    
+    # Connect nodes
+    links.new(attr_node.outputs['Color'], mix_node.inputs['A'])
+    links.new(conf_color_attr.outputs['Color'], mix_node.inputs['B'])
+    links.new(mix_node.outputs['Result'], bsdf.inputs['Base Color'])
     links.new(bsdf.outputs['BSDF'], output_node_material.inputs['Surface'])
+    
+    # Set up driver from object property to material mix factor
+    fcurve = mix_node.inputs['Factor'].driver_add('default_value')
+    driver = fcurve.driver
+    driver.type = 'AVERAGE'
+    var = driver.variables.new()
+    var.name = 'show_conf'
+    var.type = 'SINGLE_PROP'
+    var.targets[0].id_type = 'OBJECT'
+    var.targets[0].id = obj
+    var.targets[0].data_path = '["show_confidence"]'
+    
+    # Geometry nodes setup
     geo_mod = obj.modifiers.new(name="GeometryNodes", type='NODES')
     node_group = bpy.data.node_groups.new(name="PointCloud", type='GeometryNodeTree')
     node_group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
