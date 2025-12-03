@@ -340,16 +340,17 @@ def combine_base_and_metric(base, metric):
     assert non_sky_mask.sum() > 10, "Insufficient non-sky pixels for alignment"
 
     # Align using compute_alignment_mask logic from da3.py
-    # output.conf is the depth confidence
+    # output.conf is the depth confidence - convert to tensor if needed
+    depth_conf = _to_tensor(output.conf).float()
     
     # Sample depth confidence for quantile computation
-    depth_conf_ns = output.conf[non_sky_mask]
+    depth_conf_ns = depth_conf[non_sky_mask]
     depth_conf_sampled = sample_tensor_for_quantile(depth_conf_ns, max_samples=100000)
     median_conf = torch.quantile(depth_conf_sampled, 0.5)
 
     # Compute alignment mask
     align_mask = compute_alignment_mask(
-        output.conf, non_sky_mask, depth, metric_depth, median_conf
+        depth_conf, non_sky_mask, depth, metric_depth, median_conf
     )
 
     # Compute scale factor using least squares on aligned pixels
@@ -437,13 +438,14 @@ def combine_base_with_metric_depth(base, metric):
         raise ValueError("Insufficient non-sky pixels for metric depth sky handling")
 
     # Compute global scale factor aligning base depth to metric depth
-    # Use robust alignment mask
-    depth_conf_ns = output.conf[non_sky_mask]
+    # Use robust alignment mask - convert conf to tensor if needed
+    depth_conf = _to_tensor(output.conf).float()
+    depth_conf_ns = depth_conf[non_sky_mask]
     depth_conf_sampled = sample_tensor_for_quantile(depth_conf_ns, max_samples=100000)
     median_conf = torch.quantile(depth_conf_sampled, 0.5)
 
     align_mask = compute_alignment_mask(
-        output.conf, non_sky_mask, base_depth, metric_depth, median_conf
+        depth_conf, non_sky_mask, base_depth, metric_depth, median_conf
     )
 
     valid_base = base_depth[align_mask]
