@@ -253,10 +253,47 @@ def convert_prediction_to_dict(prediction, image_paths=None):
     predictions['depth'] = _to_numpy(prediction.depth)
     predictions['extrinsic'] = _to_numpy(prediction.extrinsics)
     predictions['intrinsic'] = _to_numpy(prediction.intrinsics)
-    predictions['conf'] = prediction.conf
+    predictions['conf'] = _to_numpy(prediction.conf)
 
     if image_paths is not None:
         predictions['image_paths'] = image_paths
+        
+        # Save debug images
+        try:
+            import cv2
+            # Create debug directory
+            first_img_dir = os.path.dirname(image_paths[0])
+            debug_dir = os.path.join(first_img_dir, "debug_output")
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            for i, img_path in enumerate(image_paths):
+                base_name = os.path.splitext(os.path.basename(img_path))[0]
+                
+                # Depth
+                depth_map = predictions['depth'][i]
+                # Normalize depth for visualization: 0-255
+                d_min = np.nanmin(depth_map)
+                d_max = np.nanmax(depth_map)
+                if d_max > d_min:
+                    depth_norm = ((depth_map - d_min) / (d_max - d_min) * 255.0).astype(np.uint8)
+                else:
+                    depth_norm = np.zeros_like(depth_map, dtype=np.uint8)
+                
+                depth_filename = os.path.join(debug_dir, f"{base_name}_depth.png")
+                cv2.imwrite(depth_filename, depth_norm)
+                
+                # Confidence
+                conf_map = predictions['conf'][i]
+                # Scale confidence: * 10, clip to 255
+                conf_scaled = np.clip(conf_map * 10.0, 0, 255).astype(np.uint8)
+                
+                conf_filename = os.path.join(debug_dir, f"{base_name}_conf.png")
+                cv2.imwrite(conf_filename, conf_scaled)
+                
+        except ImportError:
+            print("Warning: cv2 not found, skipping debug image output.")
+        except Exception as e:
+            print(f"Warning: Failed to save debug images: {e}")
     
     print("DEBUG shapes:")
     print("  images:", predictions['images'].shape)
