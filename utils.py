@@ -289,6 +289,13 @@ def convert_prediction_to_dict(prediction, image_paths=None):
                 
                 conf_filename = os.path.join(debug_dir, f"{base_name}_conf.png")
                 cv2.imwrite(conf_filename, conf_scaled)
+
+                # Color Image
+                color_img = predictions['images'][i]
+                color_img_uint8 = (np.clip(color_img, 0, 1) * 255).astype(np.uint8)
+                color_img_bgr = cv2.cvtColor(color_img_uint8, cv2.COLOR_RGB2BGR)
+                color_filename = os.path.join(debug_dir, f"{base_name}_color.png")
+                cv2.imwrite(color_filename, color_img_bgr)
                 
         except ImportError:
             print("Warning: cv2 not found, skipping debug image output.")
