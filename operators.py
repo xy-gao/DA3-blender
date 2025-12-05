@@ -273,62 +273,80 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                     wm.progress_update(75)
                     self.report({'INFO'}, "Running metric model inference...")
                     
-                    if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
-                        # Process in overlapping batches for metric too (mirror base logic)
-                        if batch_mode == "last_frame_overlap":
-                            step = batch_size - 1
-                            num_batches = (len(image_paths) + step - 1) // step
-                            for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
-                                end_idx = min(start_idx + batch_size, len(image_paths))
-                                batch_paths = image_paths[start_idx:end_idx]
-                                batch_indices = list(range(start_idx, end_idx))
-                                print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
-                                all_metric_predictions.append((prediction, batch_indices))
-                        else:
-                            N = len(image_paths)
-                            if batch_size < 3:
-                                step = 1
-                            else:
-                                step = batch_size - 2
-
-                            start = 0
-                            end = min(batch_size, N)
-                            batch_indices = list(range(start, end))
-                            current_new_indices = batch_indices
-                            
-                            remaining_start = end
-                            
-                            if step > 0:
-                                num_batches = 1 + max(0, (N - end + step - 1) // step)
-                            else:
-                                num_batches = (N + batch_size - 1) // batch_size
-
-                            batch_idx = 0
-                            while True:
-                                batch_paths = [image_paths[i] for i in batch_indices]
-                                print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
-                                all_metric_predictions.append((prediction, batch_indices.copy()))
-
-                                if remaining_start >= N:
-                                    break
-
-                                overlap_indices = [current_new_indices[0], current_new_indices[-1]]
-                                if overlap_indices[0] == overlap_indices[1]:
-                                    overlap_indices = [overlap_indices[0]]
-
-                                next_end = min(remaining_start + step, N)
-                                next_new_indices = list(range(remaining_start, next_end))
-                                
-                                batch_indices = overlap_indices + next_new_indices
-                                current_new_indices = next_new_indices
-                                
-                                remaining_start = next_end
-                                batch_idx += 1
+                    if metric_mode == "scale_base":
+                        # In scale_base mode, run **one** metric batch over all images.
+                        N = len(image_paths)
+                        start = 0
+                        end = min(batch_size, N)
+                        batch_indices = list(range(start, end))
+                        batch_paths = [image_paths[i] for i in batch_indices]
+                        prediction = run_model(
+                            batch_paths,
+                            metric_model,
+                            process_res,
+                            process_res_method,
+                            use_half=use_half_precision,
+                            use_ray_pose=use_ray_pose,
+                        )
+                        all_metric_predictions.append((prediction, batch_indices.copy()))
                     else:
-                        prediction = run_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
-                        all_metric_predictions.append((prediction, list(range(len(image_paths)))))
+                        # For other metric modes, keep previous batching behaviour
+                        if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+                            # Process in overlapping batches for metric too (mirror base logic)
+                            if batch_mode == "last_frame_overlap":
+                                step = batch_size - 1
+                                num_batches = (len(image_paths) + step - 1) // step
+                                for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
+                                    end_idx = min(start_idx + batch_size, len(image_paths))
+                                    batch_paths = image_paths[start_idx:end_idx]
+                                    batch_indices = list(range(start_idx, end_idx))
+                                    print(f"Batch {batch_idx + 1}/{num_batches}:")
+                                    prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
+                                    all_metric_predictions.append((prediction, batch_indices))
+                            else:
+                                N = len(image_paths)
+                                if batch_size < 3:
+                                    step = 1
+                                else:
+                                    step = batch_size - 2
+
+                                start = 0
+                                end = min(batch_size, N)
+                                batch_indices = list(range(start, end))
+                                current_new_indices = batch_indices
+                                
+                                remaining_start = end
+                                
+                                if step > 0:
+                                    num_batches = 1 + max(0, (N - end + step - 1) // step)
+                                else:
+                                    num_batches = (N + batch_size - 1) // batch_size
+
+                                batch_idx = 0
+                                while True:
+                                    batch_paths = [image_paths[i] for i in batch_indices]
+                                    print(f"Batch {batch_idx + 1}/{num_batches}:")
+                                    prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
+                                    all_metric_predictions.append((prediction, batch_indices.copy()))
+
+                                    if remaining_start >= N:
+                                        break
+
+                                    overlap_indices = [current_new_indices[0], current_new_indices[-1]]
+                                    if overlap_indices[0] == overlap_indices[1]:
+                                        overlap_indices = [overlap_indices[0]]
+
+                                    next_end = min(remaining_start + step, N)
+                                    next_new_indices = list(range(remaining_start, next_end))
+                                    
+                                    batch_indices = overlap_indices + next_new_indices
+                                    current_new_indices = next_new_indices
+                                    
+                                    remaining_start = next_end
+                                    batch_idx += 1
+                        else:
+                            prediction = run_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
+                            all_metric_predictions.append((prediction, list(range(len(image_paths)))))
                     
                     wm.progress_update(90)
                     metric_model = None
@@ -336,11 +354,13 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 else:
                     self.report({'WARNING'}, "Metric model not downloaded; using non-metric depth only.")
             
-            # Align batches
+            # Align base batches. Metric is **not** aligned in scale_base mode.
             if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
                 aligned_base_predictions = align_batches(all_base_predictions)
-                if metric_available:
+                if metric_available and metric_mode != "scale_base":
                     aligned_metric_predictions = align_batches(all_metric_predictions)
+                elif metric_available:
+                    aligned_metric_predictions = [p[0] for p in all_metric_predictions]
             else:
                 aligned_base_predictions = [p[0] for p in all_base_predictions]
                 if metric_available:
@@ -355,28 +375,21 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             parent_col = collections.new(folder_name)
             scene.collection.children.link(parent_col)
 
-            # Process each batch
-            for i, base_pred in enumerate(aligned_base_predictions):
-                batch_indices = all_base_predictions[i][1]
+            # Combine the base and metric predictions
+            if metric_available:
+                all_combined_predictions = combine_base_and_metric(aligned_base_predictions, aligned_metric_predictions)
+            else:
+                all_combined_predictions = aligned_base_predictions
+
+            # Add a point cloud for each batch
+            for batch_number, batch_prediction in enumerate(all_combined_predictions):
+                batch_indices = all_base_predictions[batch_number][1]
                 batch_paths = [image_paths[j] for j in batch_indices]
                 
-                if metric_available:
-                    metric_pred = aligned_metric_predictions[i]
-                    if metric_mode == "metric_depth":
-                        combined_prediction = combine_base_with_metric_depth(
-                            base_pred, metric_pred
-                        )
-                    else:
-                        combined_prediction = combine_base_and_metric(
-                            base_pred, metric_pred
-                        )
-                else:
-                    combined_prediction = base_pred
-                
-                combined_predictions = convert_prediction_to_dict(combined_prediction, batch_paths)
+                combined_predictions = convert_prediction_to_dict(batch_prediction, batch_paths)
                 
                 # Create batch collection
-                batch_col_name = f"{folder_name}_Batch_{i+1}"
+                batch_col_name = f"{folder_name}_Batch_{batch_number+1}"
                 batch_col = collections.new(batch_col_name)
                 parent_col.children.link(batch_col)
                 
