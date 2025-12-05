@@ -417,9 +417,8 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             # Align base batches. Metric is **not** aligned in scale_base mode.
             if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
                 aligned_base_predictions = align_batches(all_base_predictions)
-                if metric_available and metric_mode != "scale_base":
-                    aligned_metric_predictions = align_batches(all_metric_predictions)
-                elif metric_available:
+                # Metric depth is absolute, and has no camera poses, so alignment between batches is less important (and not implemented yet).
+                if metric_available:
                     aligned_metric_predictions = [p[0] for p in all_metric_predictions]
             else:
                 aligned_base_predictions = [p[0] for p in all_base_predictions]
