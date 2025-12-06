@@ -14,6 +14,7 @@ from .utils import (
     import_mesh_from_depth,
     create_cameras,
     align_batches,
+    compute_motion_scores,
 )
 
 wm = None
@@ -446,6 +447,14 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             else:
                 all_combined_predictions = aligned_base_predictions
             update_progress_timer(AfterCombineTimeEstimate, "Combined predictions complete")
+
+            # Detect motion
+            detect_motion = getattr(context.scene, "da3_detect_motion", False)
+            if detect_motion:
+                motion_threshold = getattr(context.scene, "da3_motion_threshold", 0.1)
+                self.report({'INFO'}, "Detecting motion...")
+                compute_motion_scores(all_combined_predictions, threshold_ratio=motion_threshold)
+                # update_progress_timer(AfterCombineTimeEstimate + 1.0, "Motion detection complete")
 
             # Add a point cloud for each batch
             for batch_number, batch_prediction in enumerate(all_combined_predictions):

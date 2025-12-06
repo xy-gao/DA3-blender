@@ -243,6 +243,136 @@ def align_batches(all_predictions):
     # We've finished all batches, return a list of aligned predictions
     return aligned_predictions
 
+def compute_motion_scores(predictions, threshold_ratio=0.1):
+    """
+    Computes a motion score for each pixel based on consistency with other frames.
+    Score is the number of other frames that see 'empty space' where the point should be.
+    """
+    import torch
+    
+    # Collect all data
+    all_depths = []
+    all_extrinsics = []
+    all_intrinsics = []
+    frame_mapping = [] # List of (batch_index, frame_index_in_batch)
+    
+    for b_idx, pred in enumerate(predictions):
+        # Ensure we have tensors
+        d = _to_tensor(pred.depth).float()
+        e = _to_tensor(pred.extrinsics).float()
+        k = _to_tensor(pred.intrinsics).float()
+        
+        # Initialize motion attribute on prediction object
+        if not hasattr(pred, 'motion'):
+            pred.motion = torch.zeros_like(d)
+            
+        for f_idx in range(d.shape[0]):
+            all_depths.append(d[f_idx])
+            all_extrinsics.append(e[f_idx])
+            all_intrinsics.append(k[f_idx])
+            frame_mapping.append((b_idx, f_idx))
+            
+    if not all_depths:
+        return
+
+    # Stack
+    depths = torch.stack(all_depths) # [N, H, W]
+    extrinsics = torch.stack(all_extrinsics) # [N, 3, 4]
+    intrinsics = torch.stack(all_intrinsics) # [N, 3, 3]
+    
+    N, H, W = depths.shape
+    device = depths.device
+    
+    print(f"Computing motion scores for {N} frames...")
+    
+    # Construct 4x4 matrices
+    Es = torch.eye(4, device=device).unsqueeze(0).repeat(N, 1, 1)
+    Es[:, :3, :4] = extrinsics
+    Es_inv = torch.linalg.inv(Es)
+    
+    # Pixel grid
+    y, x = torch.meshgrid(torch.arange(H, device=device), torch.arange(W, device=device), indexing='ij')
+    pixels_hom = torch.stack([x.flatten(), y.flatten(), torch.ones_like(x.flatten())], dim=0).float() # [3, HW]
+    
+    # Loop over source frames
+    for i in range(N):
+        if i % 10 == 0:
+            print(f"  Processing frame {i+1}/{N}")
+            
+        # Unproject frame i
+        K_i_inv = torch.linalg.inv(intrinsics[i])
+        rays_i = K_i_inv @ pixels_hom # [3, HW]
+        d_i = depths[i].flatten() # [HW]
+        
+        # Filter valid depth
+        valid_mask = d_i > 0
+        if not valid_mask.any():
+            continue
+            
+        points_cam_i = rays_i[:, valid_mask] * d_i[valid_mask].unsqueeze(0) # [3, M]
+        points_cam_i_hom = torch.cat([points_cam_i, torch.ones((1, points_cam_i.shape[1]), device=device)], dim=0) # [4, M]
+        
+        # Transform to world
+        points_world_hom = Es_inv[i] @ points_cam_i_hom # [4, M]
+        
+        motion_votes = torch.zeros(points_cam_i.shape[1], device=device)
+        
+        # Check against all other frames j
+        # Optimization: Process in chunks if N is large? 
+        # For now, simple loop.
+        for j in range(N):
+            if i == j:
+                continue
+                
+            # Project to frame j
+            points_cam_j_hom = Es[j] @ points_world_hom # [4, M]
+            # Check if in front of camera
+            z_j = points_cam_j_hom[2]
+            in_front = z_j > 0.1 # Near plane
+            
+            if not in_front.any():
+                continue
+                
+            # Project to pixels
+            points_cam_j = points_cam_j_hom[:3]
+            proj_j = intrinsics[j] @ points_cam_j
+            u_j = proj_j[0] / proj_j[2]
+            v_j = proj_j[1] / proj_j[2]
+            
+            # Check bounds
+            in_bounds = (u_j >= 0) & (u_j < W - 1) & (v_j >= 0) & (v_j < H - 1) & in_front
+            
+            if not in_bounds.any():
+                continue
+                
+            # Sample depth from frame j
+            u_j_int = torch.round(u_j).long()
+            v_j_int = torch.round(v_j).long()
+            
+            # Filter indices
+            valid_indices = torch.where(in_bounds)[0]
+            
+            u_sample = u_j_int[valid_indices]
+            v_sample = v_j_int[valid_indices]
+            
+            d_target = depths[j, v_sample, u_sample]
+            d_proj = z_j[valid_indices]
+            
+            # Check for "empty space"
+            # If d_target > d_proj * (1 + threshold)
+            is_empty = d_target > d_proj * (1 + threshold_ratio)
+            
+            # Accumulate votes
+            motion_votes[valid_indices[is_empty]] += 1
+            
+        # Store result
+        full_motion = torch.zeros(H*W, device=device)
+        full_motion[valid_mask] = motion_votes
+        
+        # Save to prediction object
+        b_idx, f_idx = frame_mapping[i]
+        predictions[b_idx].motion[f_idx] = full_motion.reshape(H, W)
+
 def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images=False):
     predictions = {}
 
@@ -254,6 +384,9 @@ def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images
     predictions['extrinsic'] = _to_numpy(prediction.extrinsics)
     predictions['intrinsic'] = _to_numpy(prediction.intrinsics)
     predictions['conf'] = _to_numpy(prediction.conf)
+    
+    if hasattr(prediction, 'motion'):
+        predictions['motion'] = _to_numpy(prediction.motion)
 
     if image_paths is not None and output_debug_images:
         predictions['image_paths'] = image_paths
@@ -668,6 +801,10 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
     colors_batch = images.reshape(-1, 3)
     colors_batch = np.hstack((colors_batch, np.ones((colors_batch.shape[0], 1))))
     conf_batch = conf.reshape(-1)
+    
+    motion_batch = None
+    if 'motion' in d:
+        motion_batch = d['motion'].reshape(-1)
 
     # Remove points with low confidence
     if min_confidence > 0:
@@ -675,6 +812,8 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
         points_batch = points_batch[valid_mask]
         colors_batch = colors_batch[valid_mask]
         conf_batch = conf_batch[valid_mask]
+        if motion_batch is not None:
+            motion_batch = motion_batch[valid_mask]
     
     if len(conf_batch) > 0:
         print(f"DEBUG confidence: min={conf_batch.min():.4f}, max={conf_batch.max():.4f}")
@@ -692,6 +831,12 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
     attribute_conf = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
     conf_values = conf_batch.tolist()
     attribute_conf.data.foreach_set("value", conf_values)
+    
+    # Motion score
+    if motion_batch is not None:
+        attribute_motion = mesh.attributes.new(name="motion", type="FLOAT", domain="POINT")
+        motion_values = motion_batch.tolist()
+        attribute_motion.data.foreach_set("value", motion_values)
     
     obj = bpy.data.objects.new("Points", mesh)
 
@@ -891,6 +1036,10 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
         cols = np.hstack((cols, np.ones((cols.shape[0], 1)))) # RGBA
         confs = conf[i].reshape(-1)
         
+        motion_vals = None
+        if 'motion' in d:
+            motion_vals = d['motion'][i].reshape(-1)
+        
         # Create Mesh
         if "image_paths" in d and i < len(d["image_paths"]):
             base_name = os.path.splitext(os.path.basename(d["image_paths"][i]))[0]
@@ -916,6 +1065,11 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
         # Confidence
         conf_attr = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
         conf_attr.data.foreach_set("value", confs)
+        
+        # Motion
+        if motion_vals is not None:
+            motion_attr = mesh.attributes.new(name="motion", type="FLOAT", domain="POINT")
+            motion_attr.data.foreach_set("value", motion_vals)
         
         obj = bpy.data.objects.new(mesh_name, mesh)
         if collection:
