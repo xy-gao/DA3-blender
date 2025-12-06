@@ -243,7 +243,7 @@ def align_batches(all_predictions):
     # We've finished all batches, return a list of aligned predictions
     return aligned_predictions
 
-def convert_prediction_to_dict(prediction, image_paths=None):
+def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images=False):
     predictions = {}
 
     # images is already numpy in your current pipeline
@@ -255,7 +255,7 @@ def convert_prediction_to_dict(prediction, image_paths=None):
     predictions['intrinsic'] = _to_numpy(prediction.intrinsics)
     predictions['conf'] = _to_numpy(prediction.conf)
 
-    if image_paths is not None:
+    if image_paths is not None and output_debug_images:
         predictions['image_paths'] = image_paths
         
         # Save debug images
@@ -296,11 +296,52 @@ def convert_prediction_to_dict(prediction, image_paths=None):
                 color_img_bgr = cv2.cvtColor(color_img_uint8, cv2.COLOR_RGB2BGR)
                 color_filename = os.path.join(debug_dir, f"{base_name}_color.png")
                 cv2.imwrite(color_filename, color_img_bgr)
+
+                # Bad Confidence Overlay
+                H, W = conf_map.shape
+                bad_img = np.zeros((H, W, 4), dtype=np.uint8) # BGRA
+                
+                # Yellow for conf <= 2.0
+                mask_yellow = (conf_map <= 2.0)
+                bad_img[mask_yellow] = [0, 255, 255, 255] # Yellow
+                
+                # Red for conf <= 1.0
+                mask_red = (conf_map <= 1.0)
+                bad_img[mask_red] = [0, 0, 255, 255] # Red
+                
+                # Magenta for conf <= 1.0 adjacent to conf > 1.0
+                mask_good = (conf_map > 1.0)
+                kernel = np.ones((3,3), np.uint8)
+                # Dilate good area to find neighbors
+                dilated_good = cv2.dilate(mask_good.astype(np.uint8), kernel, iterations=1).astype(bool)
+                # Intersection: Is red AND is touched by good
+                mask_magenta = mask_red & dilated_good
+                bad_img[mask_magenta] = [255, 0, 255, 255] # Magenta
+                
+                bad_filename = os.path.join(debug_dir, f"{base_name}_bad.png")
+                cv2.imwrite(bad_filename, bad_img)
+
+                # Depth Gradient
+                grad_x = cv2.Sobel(depth_map, cv2.CV_64F, 1, 0, ksize=3)
+                grad_y = cv2.Sobel(depth_map, cv2.CV_64F, 0, 1, ksize=3)
+                grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+                
+                g_min = np.nanmin(grad_mag)
+                g_max = np.nanmax(grad_mag)
+                if g_max > g_min:
+                    grad_norm = ((grad_mag - g_min) / (g_max - g_min) * 255.0).astype(np.uint8)
+                else:
+                    grad_norm = np.zeros_like(grad_mag, dtype=np.uint8)
+                
+                grad_filename = os.path.join(debug_dir, f"{base_name}_grad.png")
+                cv2.imwrite(grad_filename, grad_norm)
                 
         except ImportError:
             print("Warning: cv2 not found, skipping debug image output.")
         except Exception as e:
             print(f"Warning: Failed to save debug images: {e}")
+    elif image_paths is not None:
+        predictions['image_paths'] = image_paths
     
     print("DEBUG shapes:")
     print("  images:", predictions['images'].shape)
@@ -523,10 +564,33 @@ def combine_base_with_metric_depth(base, metric):
 
     return output
 
-def import_point_cloud(d, collection=None):
+def import_point_cloud(d, collection=None, filter_edges=True):
     points = d["world_points_from_depth"]
     images = d["images"]
     conf = d["conf"]
+
+    # Filter confidence based on depth gradient
+    if filter_edges and "depth" in d:
+        try:
+            import cv2
+            depth = d["depth"]
+            for i in range(len(depth)):
+                dm = depth[i]
+                gx = cv2.Sobel(dm, cv2.CV_64F, 1, 0, ksize=3)
+                gy = cv2.Sobel(dm, cv2.CV_64F, 0, 1, ksize=3)
+                mag = np.sqrt(gx**2 + gy**2)
+                mn, mx = np.nanmin(mag), np.nanmax(mag)
+                if mx > mn:
+                    norm = (mag - mn) / (mx - mn)
+                else:
+                    norm = np.zeros_like(mag)
+                
+                # Set confidence to 0 if normalized gradient >= 12/255
+                mask = norm >= (12.0 / 255.0)
+                conf[i][mask] = 0.0
+        except Exception as e:
+            print(f"Failed to filter confidence by gradient: {e}")
+
     points_batch = points.reshape(-1, 3)
     reordered_points_batch = points_batch.copy()
     reordered_points_batch[:, [0, 1, 2]] = points_batch[:, [0, 2, 1]]

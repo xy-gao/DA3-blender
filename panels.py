@@ -48,6 +48,8 @@ class DA3Panel(bpy.types.Panel):
             layout.prop(scene, "da3_batch_size", text="Batch Size")
         layout.prop(scene, "da3_use_ray_pose", text="Use Ray-based Pose")
         layout.prop(scene, "da3_use_half_precision", text="Use Half Precision")
+        layout.prop(scene, "da3_filter_edges", text="Filter Edges")
+        layout.prop(scene, "da3_output_debug_images", text="Output Debug Images")
         row = layout.row()
         row.operator("da3.generate_point_cloud")
         row = layout.row()

@@ -180,6 +180,8 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         process_res = context.scene.da3_process_res
         process_res_method = context.scene.da3_process_res_method
         use_half_precision = context.scene.da3_use_half_precision
+        filter_edges = getattr(context.scene, "da3_filter_edges", True)
+        output_debug_images = getattr(context.scene, "da3_output_debug_images", False)
         
         if process_res % 14 != 0:
             self.report({'ERROR'}, "Process resolution must be a multiple of 14.")
@@ -447,14 +449,14 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 batch_indices = all_base_predictions[batch_number][1]
                 batch_paths = [image_paths[j] for j in batch_indices]
                 
-                combined_predictions = convert_prediction_to_dict(batch_prediction, batch_paths)
+                combined_predictions = convert_prediction_to_dict(batch_prediction, batch_paths, output_debug_images=output_debug_images)
                 
                 # Create batch collection
                 batch_col_name = f"{folder_name}_Batch_{batch_number+1}"
                 batch_col = collections.new(batch_col_name)
                 parent_col.children.link(batch_col)
                 
-                import_point_cloud(combined_predictions, collection=batch_col)
+                import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges)
                 create_cameras(combined_predictions, collection=batch_col)
                 end_idx = batch_indices[-1] + 1
                 update_progress_timer(AfterCombineTimeEstimate + AddImagePointsTime * end_idx, f"Added batch {batch_number + 1} to Blender")
