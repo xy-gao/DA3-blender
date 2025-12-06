@@ -564,7 +564,7 @@ def combine_base_with_metric_depth(base, metric):
 
     return output
 
-def import_point_cloud(d, collection=None, filter_edges=True):
+def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5):
     points = d["world_points_from_depth"]
     images = d["images"]
     conf = d["conf"]
@@ -599,8 +599,16 @@ def import_point_cloud(d, collection=None, filter_edges=True):
     colors_batch = images.reshape(-1, 3)
     colors_batch = np.hstack((colors_batch, np.ones((colors_batch.shape[0], 1))))
     conf_batch = conf.reshape(-1)
+
+    # Remove points with low confidence
+    if min_confidence > 0:
+        valid_mask = conf_batch >= min_confidence
+        points_batch = points_batch[valid_mask]
+        colors_batch = colors_batch[valid_mask]
+        conf_batch = conf_batch[valid_mask]
     
-    print(f"DEBUG confidence: min={conf_batch.min():.4f}, max={conf_batch.max():.4f}")
+    if len(conf_batch) > 0:
+        print(f"DEBUG confidence: min={conf_batch.min():.4f}, max={conf_batch.max():.4f}")
     
     mesh = bpy.data.meshes.new(name="Points")
     vertices = points_batch.tolist()

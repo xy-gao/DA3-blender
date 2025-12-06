@@ -102,6 +102,13 @@ def register():
             description="Set confidence to 0 for pixels with high depth gradient",
             default=True,
         )
+        bpy.types.Scene.da3_min_confidence = bpy.props.FloatProperty(
+            name="Min Confidence",
+            description="Minimum confidence threshold for points (points below this will be removed)",
+            default=0.5,
+            min=0.0,
+            max=100.0,
+        )
         bpy.types.Scene.da3_output_debug_images = bpy.props.BoolProperty(
             name="Output Debug Images",
             description="Save debug images (depth, confidence, etc.) to a subfolder",
@@ -128,6 +135,7 @@ def unregister():
         del bpy.types.Scene.da3_batch_size
         del bpy.types.Scene.da3_batch_mode
         del bpy.types.Scene.da3_filter_edges
+        del bpy.types.Scene.da3_min_confidence
         del bpy.types.Scene.da3_output_debug_images
 
 if __name__ == "__main__":
