@@ -769,26 +769,51 @@ def get_or_create_point_material():
 def add_point_cloud_geo_nodes(obj, mat):
     geo_mod = obj.modifiers.new(name="GeometryNodes", type='NODES')
     node_group = bpy.data.node_groups.new(name="PointCloud", type='GeometryNodeTree')
+    
+    # Inputs
     node_group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
     node_group.interface.new_socket(name="Threshold", in_out="INPUT", socket_type="NodeSocketFloat")
     node_group.interface.items_tree[-1].default_value = 0.5
+    node_group.interface.new_socket(name="Scale", in_out="INPUT", socket_type="NodeSocketFloat")
+    node_group.interface.items_tree[-1].default_value = 1.0
+    node_group.interface.items_tree[-1].min_value = 0.0
+    
+    # Outputs
     node_group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+    
     geo_mod.node_group = node_group
+    
+    # Nodes
     input_node = node_group.nodes.new('NodeGroupInput')
     output_node = node_group.nodes.new('NodeGroupOutput')
+    
     mesh_to_points = node_group.nodes.new('GeometryNodeMeshToPoints')
-    mesh_to_points.inputs['Radius'].default_value = 0.002
+    # Radius controlled by Scale input * 0.002
+    math_node = node_group.nodes.new('ShaderNodeMath')
+    math_node.operation = 'MULTIPLY'
+    math_node.inputs[1].default_value = 0.002
+    
     named_attr = node_group.nodes.new('GeometryNodeInputNamedAttribute')
     named_attr.inputs['Name'].default_value = "conf"
     named_attr.data_type = 'FLOAT'
+    
     compare = node_group.nodes.new('FunctionNodeCompare')
     compare.data_type = 'FLOAT'
     compare.operation = 'LESS_THAN'
+    
     delete_geo = node_group.nodes.new('GeometryNodeDeleteGeometry')
     delete_geo.domain = 'POINT'
+    
     set_material_node = node_group.nodes.new('GeometryNodeSetMaterial')
     set_material_node.inputs['Material'].default_value = mat
+    
+    # Links
     node_group.links.new(input_node.outputs['Geometry'], mesh_to_points.inputs['Mesh'])
+    
+    # Scale logic
+    node_group.links.new(input_node.outputs['Scale'], math_node.inputs[0])
+    node_group.links.new(math_node.outputs['Value'], mesh_to_points.inputs['Radius'])
+    
     node_group.links.new(mesh_to_points.outputs['Points'], delete_geo.inputs['Geometry'])
     node_group.links.new(named_attr.outputs['Attribute'], compare.inputs['A'])
     node_group.links.new(input_node.outputs['Threshold'], compare.inputs['B'])
@@ -911,7 +936,32 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
                     obj_name = f"Moving_Frame_{i}"
                 
                 target_col = moving_collection if moving_collection else collection
-                create_point_cloud_object(obj_name, p_trans[is_moving], c[is_moving], cf[is_moving], m[is_moving], target_col)
+                obj = create_point_cloud_object(obj_name, p_trans[is_moving], c[is_moving], cf[is_moving], m[is_moving], target_col)
+                
+                # Animate Visibility
+                spacing = 15
+                duration = 15
+                
+                start_frame = 1 + i * spacing
+                end_frame = start_frame + duration
+                
+                # Ensure we start hidden
+                obj.hide_viewport = True
+                obj.hide_render = True
+                obj.keyframe_insert(data_path="hide_viewport", frame=0)
+                obj.keyframe_insert(data_path="hide_render", frame=0)
+                
+                # Show
+                obj.hide_viewport = False
+                obj.hide_render = False
+                obj.keyframe_insert(data_path="hide_viewport", frame=start_frame)
+                obj.keyframe_insert(data_path="hide_render", frame=start_frame)
+                
+                # Hide
+                obj.hide_viewport = True
+                obj.hide_render = True
+                obj.keyframe_insert(data_path="hide_viewport", frame=end_frame)
+                obj.keyframe_insert(data_path="hide_render", frame=end_frame)
         
         if stationary_points:
             create_point_cloud_object("Points_Stationary", np.vstack(stationary_points), np.vstack(stationary_colors), np.concatenate(stationary_confs), np.concatenate(stationary_motions), collection)
