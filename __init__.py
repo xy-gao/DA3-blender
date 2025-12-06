@@ -97,6 +97,40 @@ def register():
             description="How to select images for processing",
             default="skip_frames"
         )
+        bpy.types.Scene.da3_filter_edges = bpy.props.BoolProperty(
+            name="Filter Edges",
+            description="Set confidence to 0 for pixels with high depth gradient",
+            default=True,
+        )
+        bpy.types.Scene.da3_min_confidence = bpy.props.FloatProperty(
+            name="Min Confidence",
+            description="Minimum confidence threshold for points (points below this will be removed)",
+            default=0.5,
+            min=0.0,
+            max=100.0,
+        )
+        bpy.types.Scene.da3_output_debug_images = bpy.props.BoolProperty(
+            name="Output Debug Images",
+            description="Save debug images (depth, confidence, etc.) to a subfolder",
+            default=False,
+        )
+        bpy.types.Scene.da3_generate_mesh = bpy.props.BoolProperty(
+            name="Generate Meshes",
+            description="Generate independent textured meshes for each input image instead of a point cloud",
+            default=False,
+        )
+        bpy.types.Scene.da3_detect_motion = bpy.props.BoolProperty(
+            name="Detect Motion",
+            description="Identify and animate moving objects by checking if they're missing in other frames",
+            default=False,
+        )
+        bpy.types.Scene.da3_motion_threshold = bpy.props.FloatProperty(
+            name="Motion Threshold",
+            description="Depth difference ratio to consider as empty space (e.g. 0.1 = 10%)",
+            default=0.1,
+            min=0.01,
+            max=1.0,
+        )
     else:
         raise ValueError("installation failed.")
 
@@ -117,6 +151,12 @@ def unregister():
         del bpy.types.Scene.da3_use_ray_pose
         del bpy.types.Scene.da3_batch_size
         del bpy.types.Scene.da3_batch_mode
+        del bpy.types.Scene.da3_filter_edges
+        del bpy.types.Scene.da3_min_confidence
+        del bpy.types.Scene.da3_output_debug_images
+        del bpy.types.Scene.da3_generate_mesh
+        del bpy.types.Scene.da3_detect_motion
+        del bpy.types.Scene.da3_motion_threshold
 
 if __name__ == "__main__":
     register()
