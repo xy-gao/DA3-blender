@@ -766,93 +766,7 @@ def get_or_create_point_material():
         links.new(bsdf.outputs['BSDF'], output_node_material.inputs['Surface'])
     return mat
 
-def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5):
-    points = d["world_points_from_depth"]
-    images = d["images"]
-    conf = d["conf"]
-
-    # Filter confidence based on depth gradient
-    if filter_edges and "depth" in d:
-        try:
-            import cv2
-            depth = d["depth"]
-            for i in range(len(depth)):
-                dm = depth[i]
-                gx = cv2.Sobel(dm, cv2.CV_64F, 1, 0, ksize=3)
-                gy = cv2.Sobel(dm, cv2.CV_64F, 0, 1, ksize=3)
-                mag = np.sqrt(gx**2 + gy**2)
-                mn, mx = np.nanmin(mag), np.nanmax(mag)
-                if mx > mn:
-                    norm = (mag - mn) / (mx - mn)
-                else:
-                    norm = np.zeros_like(mag)
-                
-                # Set confidence to 0 if normalized gradient >= 12/255
-                mask = norm >= (12.0 / 255.0)
-                conf[i][mask] = 0.0
-        except Exception as e:
-            print(f"Failed to filter confidence by gradient: {e}")
-
-    points_batch = points.reshape(-1, 3)
-    reordered_points_batch = points_batch.copy()
-    reordered_points_batch[:, [0, 1, 2]] = points_batch[:, [0, 2, 1]]
-    reordered_points_batch[:, 2] = -reordered_points_batch[:, 2]
-    points_batch = reordered_points_batch
-    colors_batch = images.reshape(-1, 3)
-    colors_batch = np.hstack((colors_batch, np.ones((colors_batch.shape[0], 1))))
-    conf_batch = conf.reshape(-1)
-    
-    motion_batch = None
-    if 'motion' in d:
-        motion_batch = d['motion'].reshape(-1)
-
-    # Remove points with low confidence
-    if min_confidence > 0:
-        valid_mask = conf_batch >= min_confidence
-        points_batch = points_batch[valid_mask]
-        colors_batch = colors_batch[valid_mask]
-        conf_batch = conf_batch[valid_mask]
-        if motion_batch is not None:
-            motion_batch = motion_batch[valid_mask]
-    
-    if len(conf_batch) > 0:
-        print(f"DEBUG confidence: min={conf_batch.min():.4f}, max={conf_batch.max():.4f}")
-    
-    mesh = bpy.data.meshes.new(name="Points")
-    vertices = points_batch.tolist()
-    mesh.from_pydata(vertices, [], [])
-    
-    # Image colors
-    attribute = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
-    color_values = colors_batch.flatten().tolist()
-    attribute.data.foreach_set("color", color_values)
-    
-    # Raw confidence value
-    attribute_conf = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
-    conf_values = conf_batch.tolist()
-    attribute_conf.data.foreach_set("value", conf_values)
-    
-    # Motion score
-    if motion_batch is not None:
-        attribute_motion = mesh.attributes.new(name="motion", type="FLOAT", domain="POINT")
-        motion_values = motion_batch.tolist()
-        attribute_motion.data.foreach_set("value", motion_values)
-    
-    obj = bpy.data.objects.new("Points", mesh)
-
-    # Link to the provided collection, or fallback to active collection
-    if collection is not None:
-        collection.objects.link(obj)
-    else:
-        bpy.context.collection.objects.link(obj)
-
-    # Reuse existing PointMaterial or create new one
-    mat = get_or_create_point_material()
-    
-    # Add material to object so it shows up in Shading mode
-    obj.data.materials.append(mat)
-    
-    # Geometry nodes setup
+def add_point_cloud_geo_nodes(obj, mat):
     geo_mod = obj.modifiers.new(name="GeometryNodes", type='NODES')
     node_group = bpy.data.node_groups.new(name="PointCloud", type='GeometryNodeTree')
     node_group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
@@ -881,6 +795,148 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
     node_group.links.new(compare.outputs['Result'], delete_geo.inputs['Selection'])
     node_group.links.new(delete_geo.outputs['Geometry'], set_material_node.inputs['Geometry'])
     node_group.links.new(set_material_node.outputs['Geometry'], output_node.inputs['Geometry'])
+
+def create_point_cloud_object(name, points, colors, confs, motions=None, collection=None):
+    mesh = bpy.data.meshes.new(name=name)
+    mesh.from_pydata(points.tolist(), [], [])
+    
+    # Image colors
+    attribute = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
+    attribute.data.foreach_set("color", colors.flatten().tolist())
+    
+    # Raw confidence value
+    attribute_conf = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
+    attribute_conf.data.foreach_set("value", confs.tolist())
+    
+    # Motion score
+    if motions is not None:
+        attribute_motion = mesh.attributes.new(name="motion", type="FLOAT", domain="POINT")
+        attribute_motion.data.foreach_set("value", motions.tolist())
+    
+    obj = bpy.data.objects.new(name, mesh)
+
+    # Link to the provided collection, or fallback to active collection
+    if collection is not None:
+        collection.objects.link(obj)
+    else:
+        bpy.context.collection.objects.link(obj)
+
+    # Reuse existing PointMaterial or create new one
+    mat = get_or_create_point_material()
+    
+    # Add material to object so it shows up in Shading mode
+    obj.data.materials.append(mat)
+    
+    # Geometry nodes setup
+    add_point_cloud_geo_nodes(obj, mat)
+    return obj
+
+def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5):
+    points = d["world_points_from_depth"]
+    images = d["images"]
+    conf = d["conf"]
+
+    # Filter confidence based on depth gradient
+    if filter_edges and "depth" in d:
+        try:
+            import cv2
+            depth = d["depth"]
+            for i in range(len(depth)):
+                dm = depth[i]
+                gx = cv2.Sobel(dm, cv2.CV_64F, 1, 0, ksize=3)
+                gy = cv2.Sobel(dm, cv2.CV_64F, 0, 1, ksize=3)
+                mag = np.sqrt(gx**2 + gy**2)
+                mn, mx = np.nanmin(mag), np.nanmax(mag)
+                if mx > mn:
+                    norm = (mag - mn) / (mx - mn)
+                else:
+                    norm = np.zeros_like(mag)
+                
+                # Set confidence to 0 if normalized gradient >= 12/255
+                mask = norm >= (12.0 / 255.0)
+                conf[i][mask] = 0.0
+        except Exception as e:
+            print(f"Failed to filter confidence by gradient: {e}")
+
+    if 'motion' in d:
+        motion = d['motion']
+        stationary_points = []
+        stationary_colors = []
+        stationary_confs = []
+        stationary_motions = []
+        
+        # Create Moving collection
+        moving_collection = None
+        if collection:
+            moving_collection = bpy.data.collections.new("Moving")
+            collection.children.link(moving_collection)
+        
+        N = points.shape[0]
+        for i in range(N):
+            p = points[i].reshape(-1, 3)
+            c = images[i].reshape(-1, 3)
+            cf = conf[i].reshape(-1)
+            m = motion[i].reshape(-1)
+            
+            # Transform
+            p_trans = p.copy()
+            p_trans[:, [0, 1, 2]] = p[:, [0, 2, 1]]
+            p_trans[:, 2] = -p_trans[:, 2]
+            
+            c = np.hstack((c, np.ones((c.shape[0], 1)))) # RGBA
+            
+            if min_confidence > 0:
+                mask = cf >= min_confidence
+                p_trans = p_trans[mask]
+                c = c[mask]
+                cf = cf[mask]
+                m = m[mask]
+            
+            if len(p_trans) == 0: continue
+            
+            is_moving = m > 0
+            is_stationary = ~is_moving
+            
+            if is_stationary.any():
+                stationary_points.append(p_trans[is_stationary])
+                stationary_colors.append(c[is_stationary])
+                stationary_confs.append(cf[is_stationary])
+                stationary_motions.append(m[is_stationary])
+            
+            if is_moving.any():
+                if "image_paths" in d and i < len(d["image_paths"]):
+                    base_name = os.path.splitext(os.path.basename(d["image_paths"][i]))[0]
+                    obj_name = f"Moving_{base_name}"
+                else:
+                    obj_name = f"Moving_Frame_{i}"
+                
+                target_col = moving_collection if moving_collection else collection
+                create_point_cloud_object(obj_name, p_trans[is_moving], c[is_moving], cf[is_moving], m[is_moving], target_col)
+        
+        if stationary_points:
+            create_point_cloud_object("Points_Stationary", np.vstack(stationary_points), np.vstack(stationary_colors), np.concatenate(stationary_confs), np.concatenate(stationary_motions), collection)
+
+    else:
+        points_batch = points.reshape(-1, 3)
+        reordered_points_batch = points_batch.copy()
+        reordered_points_batch[:, [0, 1, 2]] = points_batch[:, [0, 2, 1]]
+        reordered_points_batch[:, 2] = -reordered_points_batch[:, 2]
+        points_batch = reordered_points_batch
+        colors_batch = images.reshape(-1, 3)
+        colors_batch = np.hstack((colors_batch, np.ones((colors_batch.shape[0], 1))))
+        conf_batch = conf.reshape(-1)
+        
+        # Remove points with low confidence
+        if min_confidence > 0:
+            valid_mask = conf_batch >= min_confidence
+            points_batch = points_batch[valid_mask]
+            colors_batch = colors_batch[valid_mask]
+            conf_batch = conf_batch[valid_mask]
+        
+        if len(conf_batch) > 0:
+            print(f"DEBUG confidence: min={conf_batch.min():.4f}, max={conf_batch.max():.4f}")
+        
+        create_point_cloud_object("Points", points_batch, colors_batch, conf_batch, None, collection)
     
 def create_cameras(predictions, collection=None, image_width=None, image_height=None):
     scene = bpy.context.scene
