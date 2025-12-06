@@ -856,7 +856,7 @@ def create_point_cloud_object(name, points, colors, confs, motions=None, collect
     add_point_cloud_geo_nodes(obj, mat)
     return obj
 
-def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5):
+def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5, global_indices=None):
     points = d["world_points_from_depth"]
     images = d["images"]
     conf = d["conf"]
@@ -942,7 +942,8 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
                 spacing = 15
                 duration = 15
                 
-                start_frame = 1 + i * spacing
+                global_idx = global_indices[i] if global_indices is not None else i
+                start_frame = 1 + global_idx * spacing
                 end_frame = start_frame + duration
                 
                 # Ensure we start hidden

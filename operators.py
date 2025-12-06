@@ -471,7 +471,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 if generate_mesh:
                     import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence)
                 else:
-                    import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                    import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
                 
                 create_cameras(combined_predictions, collection=batch_col)
                 end_idx = batch_indices[-1] + 1
