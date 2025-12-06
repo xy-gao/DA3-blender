@@ -36,7 +36,8 @@ https://github.com/user-attachments/assets/6eeff6d0-a89f-4c2c-970b-47fe2b5475d3
 - Click **Unload Model** after you have finished to free VRAM for other things, otherwise the model will stay in VRAM.
 - To view the confidence of each point in the point cloud, select the point cloud then click on the **Shading** tab at the top of the screen. In the node editor, change the **Factor** of the yellow **Mix** node to `1.0` (or something between 0 and 1) to show the confidence of each point instead of the colour.
 - To change the size of each point, select the point cloud then click on the **Geometry Nodes** tab at the top of the screen. In the node editor, change the **Radius** of the green **Mesh to Points** node to the desired size.
-- To hide points below a certain confidence level, select the point cloud, then click on the blue spanner icon in the bottom right column of icons, and set **Threshold** to a value between 1 and 30. Setting it to `2.0` will filter out almost all the noise, but also some of the background.
+- To hide points below a certain confidence level, select the point cloud, then click on the blue spanner icon in the bottom right column of icons, and set **Threshold** to a value between 1 and about 30. Setting it to `2.0` will filter out almost all the noise, but also some of the background.
+- **Generate Meshes** will create a separate textured mesh for each image instead of a single point cloud. The meshes use the original full-resolution image as a texture.
 - To view the scene from one of the cameras, select the camera, move the mouse over the 3D View, and press Ctrl+Numpad0
 
 ## Tested on

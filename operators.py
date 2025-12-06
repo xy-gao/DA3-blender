@@ -11,6 +11,7 @@ from .utils import (
     combine_base_and_metric,
     combine_base_with_metric_depth,
     import_point_cloud,
+    import_mesh_from_depth,
     create_cameras,
     align_batches,
 )
@@ -183,6 +184,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         filter_edges = getattr(context.scene, "da3_filter_edges", True)
         min_confidence = getattr(context.scene, "da3_min_confidence", 0.5)
         output_debug_images = getattr(context.scene, "da3_output_debug_images", False)
+        generate_mesh = getattr(context.scene, "da3_generate_mesh", False)
         
         if process_res % 14 != 0:
             self.report({'ERROR'}, "Process resolution must be a multiple of 14.")
@@ -457,7 +459,11 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 batch_col = collections.new(batch_col_name)
                 parent_col.children.link(batch_col)
                 
-                import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                if generate_mesh:
+                    import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                else:
+                    import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                
                 create_cameras(combined_predictions, collection=batch_col)
                 end_idx = batch_indices[-1] + 1
                 update_progress_timer(AfterCombineTimeEstimate + AddImagePointsTime * end_idx, f"Added batch {batch_number + 1} to Blender")

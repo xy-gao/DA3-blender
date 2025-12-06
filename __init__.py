@@ -114,6 +114,11 @@ def register():
             description="Save debug images (depth, confidence, etc.) to a subfolder",
             default=False,
         )
+        bpy.types.Scene.da3_generate_mesh = bpy.props.BoolProperty(
+            name="Generate Meshes",
+            description="Generate independent textured meshes for each input image instead of a point cloud",
+            default=False,
+        )
     else:
         raise ValueError("installation failed.")
 
@@ -137,6 +142,7 @@ def unregister():
         del bpy.types.Scene.da3_filter_edges
         del bpy.types.Scene.da3_min_confidence
         del bpy.types.Scene.da3_output_debug_images
+        del bpy.types.Scene.da3_generate_mesh
 
 if __name__ == "__main__":
     register()
