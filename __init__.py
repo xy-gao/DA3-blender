@@ -121,7 +121,7 @@ def register():
         )
         bpy.types.Scene.da3_detect_motion = bpy.props.BoolProperty(
             name="Detect Motion",
-            description="Identify moving objects by checking consistency across frames",
+            description="Identify and animate moving objects by checking if they're missing in other frames",
             default=False,
         )
         bpy.types.Scene.da3_motion_threshold = bpy.props.FloatProperty(

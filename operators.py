@@ -469,7 +469,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 parent_col.children.link(batch_col)
                 
                 if generate_mesh:
-                    import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                    import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
                 else:
                     import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
                 

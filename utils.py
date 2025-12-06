@@ -965,7 +965,7 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
                 obj.keyframe_insert(data_path="hide_render", frame=end_frame)
         
         if stationary_points:
-            create_point_cloud_object("Points_Stationary", np.vstack(stationary_points), np.vstack(stationary_colors), np.concatenate(stationary_confs), np.concatenate(stationary_motions), collection)
+            create_point_cloud_object("Points", np.vstack(stationary_points), np.vstack(stationary_colors), np.concatenate(stationary_confs), np.concatenate(stationary_motions), collection)
 
     else:
         points_batch = points.reshape(-1, 3)
@@ -1041,7 +1041,7 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
         R = Matrix.Rotation(math.radians(-90), 4, 'X')
         cam_obj.matrix_world = R @ cam_obj.matrix_world
 
-def create_image_material(image_path):
+def get_or_create_image_material(image_path):
     name = os.path.basename(image_path)
     mat = bpy.data.materials.get(name)
     if mat is None:
@@ -1083,7 +1083,82 @@ def create_image_material(image_path):
         links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
     return mat
 
-def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence=0.5):
+def add_filter_mesh_modifier(obj, min_confidence):
+    mod = obj.modifiers.new(name="FilterMesh", type='NODES')
+    group_name = "FilterDepthMesh"
+    group = bpy.data.node_groups.get(group_name)
+    if not group:
+        group = bpy.data.node_groups.new(group_name, 'GeometryNodeTree')
+        group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+        group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+        
+        # Nodes
+        in_node = group.nodes.new('NodeGroupInput')
+        out_node = group.nodes.new('NodeGroupOutput')
+        
+        # 1. Filter by Confidence (Delete Points)
+        del_conf = group.nodes.new('GeometryNodeDeleteGeometry')
+        del_conf.domain = 'POINT'
+        named_attr = group.nodes.new('GeometryNodeInputNamedAttribute')
+        named_attr.data_type = 'FLOAT'
+        named_attr.inputs['Name'].default_value = "conf"
+        compare_conf = group.nodes.new('FunctionNodeCompare')
+        compare_conf.operation = 'LESS_THAN'
+        compare_conf.inputs['B'].default_value = min_confidence
+        
+        group.links.new(named_attr.outputs['Attribute'], compare_conf.inputs['A'])
+        group.links.new(compare_conf.outputs['Result'], del_conf.inputs['Selection'])
+        
+        # 2. Filter by Edge Length (Delete Edges)
+        del_edge = group.nodes.new('GeometryNodeDeleteGeometry')
+        del_edge.domain = 'EDGE'
+        
+        # Calculate Edge Length manually (Edge Length node name varies)
+        edge_verts = group.nodes.new('GeometryNodeInputMeshEdgeVertices')
+        pos = group.nodes.new('GeometryNodeInputPosition')
+        
+        sample_pos1 = group.nodes.new('GeometryNodeSampleIndex')
+        sample_pos1.data_type = 'FLOAT_VECTOR'
+        sample_pos1.domain = 'POINT'
+        
+        sample_pos2 = group.nodes.new('GeometryNodeSampleIndex')
+        sample_pos2.data_type = 'FLOAT_VECTOR'
+        sample_pos2.domain = 'POINT'
+        
+        dist = group.nodes.new('ShaderNodeVectorMath')
+        dist.operation = 'DISTANCE'
+        
+        compare_edge = group.nodes.new('FunctionNodeCompare')
+        compare_edge.operation = 'GREATER_THAN'
+        compare_edge.inputs['B'].default_value = 0.1 # Threshold for jump (meters)
+        
+        # Connect Geometry (from del_conf)
+        group.links.new(del_conf.outputs['Geometry'], sample_pos1.inputs['Geometry'])
+        group.links.new(del_conf.outputs['Geometry'], sample_pos2.inputs['Geometry'])
+        
+        # Connect Indices and Values
+        group.links.new(edge_verts.outputs['Vertex Index 1'], sample_pos1.inputs['Index'])
+        group.links.new(pos.outputs['Position'], sample_pos1.inputs['Value'])
+        
+        group.links.new(edge_verts.outputs['Vertex Index 2'], sample_pos2.inputs['Index'])
+        group.links.new(pos.outputs['Position'], sample_pos2.inputs['Value'])
+        
+        # Calculate Distance
+        group.links.new(sample_pos1.outputs['Value'], dist.inputs[0])
+        group.links.new(sample_pos2.outputs['Value'], dist.inputs[1])
+        
+        # Compare
+        group.links.new(dist.outputs['Value'], compare_edge.inputs['A'])
+        group.links.new(compare_edge.outputs['Result'], del_edge.inputs['Selection'])
+        
+        # Connect Main Flow
+        group.links.new(in_node.outputs['Geometry'], del_conf.inputs['Geometry'])
+        group.links.new(del_conf.outputs['Geometry'], del_edge.inputs['Geometry'])
+        group.links.new(del_edge.outputs['Geometry'], out_node.inputs['Geometry'])
+        
+    mod.node_group = group
+
+def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence=0.5, global_indices=None):
     points = d["world_points_from_depth"] # [N, H, W, 3]
     images = d["images"] # [N, H, W, 3]
     conf = d["conf"] # [N, H, W]
@@ -1131,140 +1206,229 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
     uu, vv = np.meshgrid(u_coords, v_coords)
     uvs = np.stack([uu, vv], axis=-1).reshape(-1, 2)
 
-    for i in range(N):
-        # Prepare data for this image
-        pts = points[i].reshape(-1, 3)
-        # Apply the same coordinate transform as import_point_cloud
-        pts_transformed = pts.copy()
-        pts_transformed[:, [0, 1, 2]] = pts[:, [0, 2, 1]]
-        pts_transformed[:, 2] = -pts_transformed[:, 2]
+    if 'motion' in d:
+        motion = d['motion']
         
-        cols = images[i].reshape(-1, 3)
-        cols = np.hstack((cols, np.ones((cols.shape[0], 1)))) # RGBA
-        confs = conf[i].reshape(-1)
-        
-        motion_vals = None
-        if 'motion' in d:
-            motion_vals = d['motion'][i].reshape(-1)
-        
-        # Create Mesh
-        if "image_paths" in d and i < len(d["image_paths"]):
-            base_name = os.path.splitext(os.path.basename(d["image_paths"][i]))[0]
-            mesh_name = f"Mesh_{base_name}"
-        else:
-            mesh_name = f"Mesh_Img_{i}"
-            
-        mesh = bpy.data.meshes.new(name=mesh_name)
-        mesh.from_pydata(pts_transformed.tolist(), [], faces.tolist())
-        
-        # Add UVs
-        uv_layer = mesh.uv_layers.new(name="UVMap")
-        loop_vert_indices = np.zeros(len(mesh.loops), dtype=np.int32)
-        mesh.loops.foreach_get("vertex_index", loop_vert_indices)
-        loop_uvs = uvs[loop_vert_indices]
-        uv_layer.data.foreach_set("uv", loop_uvs.flatten())
-        
-        # Add Attributes
-        # Color
-        col_attr = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
-        col_attr.data.foreach_set("color", cols.flatten())
-        
-        # Confidence
-        conf_attr = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
-        conf_attr.data.foreach_set("value", confs)
-        
-        # Motion
-        if motion_vals is not None:
-            motion_attr = mesh.attributes.new(name="motion", type="FLOAT", domain="POINT")
-            motion_attr.data.foreach_set("value", motion_vals)
-        
-        obj = bpy.data.objects.new(mesh_name, mesh)
+        # Create Moving collection
+        moving_collection = None
         if collection:
-            collection.objects.link(obj)
-        else:
-            bpy.context.collection.objects.link(obj)
+            moving_collection = bpy.data.collections.new("Moving")
+            collection.children.link(moving_collection)
+        
+        for i in range(N):
+            # Prepare data for this image
+            pts = points[i].reshape(-1, 3)
+            # Apply the same coordinate transform as import_point_cloud
+            pts_transformed = pts.copy()
+            pts_transformed[:, [0, 1, 2]] = pts[:, [0, 2, 1]]
+            pts_transformed[:, 2] = -pts_transformed[:, 2]
             
-        # Add Material
-        if "image_paths" in d:
-            img_path = d["image_paths"][i]
-            mat = create_image_material(img_path)
-        else:
-            mat = get_or_create_point_material()
-        obj.data.materials.append(mat)
+            cols = images[i].reshape(-1, 3)
+            cols = np.hstack((cols, np.ones((cols.shape[0], 1)))) # RGBA
+            confs = conf[i].reshape(-1)
+            m = motion[i].reshape(-1)
             
-        # Add Geometry Nodes to filter stretched edges and low confidence
-        if filter_edges:
-            mod = obj.modifiers.new(name="FilterMesh", type='NODES')
-            group_name = "FilterDepthMesh"
-            group = bpy.data.node_groups.get(group_name)
-            if not group:
-                group = bpy.data.node_groups.new(group_name, 'GeometryNodeTree')
-                group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
-                group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+            is_moving = m > 0
+            
+            # --- Moving Mesh ---
+            # Face is moving if ANY vertex is moving
+            face_moving_mask = is_moving[faces[:, 0]] | is_moving[faces[:, 1]] | is_moving[faces[:, 2]] | is_moving[faces[:, 3]]
+            
+            if face_moving_mask.any():
+                sub_faces = faces[face_moving_mask]
+                unique_v = np.unique(sub_faces)
                 
-                # Nodes
-                in_node = group.nodes.new('NodeGroupInput')
-                out_node = group.nodes.new('NodeGroupOutput')
+                remap = np.zeros(len(pts_transformed), dtype=np.int32) - 1
+                remap[unique_v] = np.arange(len(unique_v))
                 
-                # 1. Filter by Confidence (Delete Points)
-                del_conf = group.nodes.new('GeometryNodeDeleteGeometry')
-                del_conf.domain = 'POINT'
-                named_attr = group.nodes.new('GeometryNodeInputNamedAttribute')
-                named_attr.data_type = 'FLOAT'
-                named_attr.inputs['Name'].default_value = "conf"
-                compare_conf = group.nodes.new('FunctionNodeCompare')
-                compare_conf.operation = 'LESS_THAN'
-                compare_conf.inputs['B'].default_value = min_confidence
+                new_faces = remap[sub_faces]
+                new_pts = pts_transformed[unique_v]
+                new_cols = cols[unique_v]
+                new_confs = confs[unique_v]
+                new_uvs = uvs.reshape(-1, 2)[unique_v]
+                new_motion = m[unique_v]
                 
-                group.links.new(named_attr.outputs['Attribute'], compare_conf.inputs['A'])
-                group.links.new(compare_conf.outputs['Result'], del_conf.inputs['Selection'])
+                if "image_paths" in d and i < len(d["image_paths"]):
+                    base_name = os.path.splitext(os.path.basename(d["image_paths"][i]))[0]
+                    mesh_name = f"Moving_Mesh_{base_name}"
+                else:
+                    mesh_name = f"Moving_Mesh_{i}"
+                    
+                mesh = bpy.data.meshes.new(name=mesh_name)
+                mesh.from_pydata(new_pts.tolist(), [], new_faces.tolist())
                 
-                # 2. Filter by Edge Length (Delete Edges)
-                del_edge = group.nodes.new('GeometryNodeDeleteGeometry')
-                del_edge.domain = 'EDGE'
+                # UVs
+                uv_layer = mesh.uv_layers.new(name="UVMap")
+                loop_vert_indices = np.zeros(len(mesh.loops), dtype=np.int32)
+                mesh.loops.foreach_get("vertex_index", loop_vert_indices)
+                loop_uvs = new_uvs[loop_vert_indices]
+                uv_layer.data.foreach_set("uv", loop_uvs.flatten())
                 
-                # Calculate Edge Length manually (Edge Length node name varies)
-                edge_verts = group.nodes.new('GeometryNodeInputMeshEdgeVertices')
-                pos = group.nodes.new('GeometryNodeInputPosition')
+                # Attributes
+                col_attr = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
+                col_attr.data.foreach_set("color", new_cols.flatten())
+                conf_attr = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
+                conf_attr.data.foreach_set("value", new_confs)
+                motion_attr = mesh.attributes.new(name="motion", type="FLOAT", domain="POINT")
+                motion_attr.data.foreach_set("value", new_motion)
                 
-                sample_pos1 = group.nodes.new('GeometryNodeSampleIndex')
-                sample_pos1.data_type = 'FLOAT_VECTOR'
-                sample_pos1.domain = 'POINT'
+                target_col = moving_collection if moving_collection else collection
+                obj = bpy.data.objects.new(mesh_name, mesh)
+                target_col.objects.link(obj)
                 
-                sample_pos2 = group.nodes.new('GeometryNodeSampleIndex')
-                sample_pos2.data_type = 'FLOAT_VECTOR'
-                sample_pos2.domain = 'POINT'
+                # Material (Image)
+                if "image_paths" in d:
+                    img_path = d["image_paths"][i]
+                    mat = get_or_create_image_material(img_path)
+                else:
+                    mat = get_or_create_point_material()
+                obj.data.materials.append(mat)
                 
-                dist = group.nodes.new('ShaderNodeVectorMath')
-                dist.operation = 'DISTANCE'
+                if filter_edges:
+                    add_filter_mesh_modifier(obj, min_confidence)
+                    
+                # Animation
+                spacing = 15
+                duration = 15
+                global_idx = global_indices[i] if global_indices is not None else i
+                start_frame = 1 + global_idx * spacing
+                end_frame = start_frame + duration
                 
-                compare_edge = group.nodes.new('FunctionNodeCompare')
-                compare_edge.operation = 'GREATER_THAN'
-                compare_edge.inputs['B'].default_value = 0.1 # Threshold for jump (meters)
+                obj.hide_viewport = True
+                obj.hide_render = True
+                obj.keyframe_insert(data_path="hide_viewport", frame=0)
+                obj.keyframe_insert(data_path="hide_render", frame=0)
                 
-                # Connect Geometry (from del_conf)
-                group.links.new(del_conf.outputs['Geometry'], sample_pos1.inputs['Geometry'])
-                group.links.new(del_conf.outputs['Geometry'], sample_pos2.inputs['Geometry'])
+                obj.hide_viewport = False
+                obj.hide_render = False
+                obj.keyframe_insert(data_path="hide_viewport", frame=start_frame)
+                obj.keyframe_insert(data_path="hide_render", frame=start_frame)
                 
-                # Connect Indices and Values
-                group.links.new(edge_verts.outputs['Vertex Index 1'], sample_pos1.inputs['Index'])
-                group.links.new(pos.outputs['Position'], sample_pos1.inputs['Value'])
+                obj.hide_viewport = True
+                obj.hide_render = True
+                obj.keyframe_insert(data_path="hide_viewport", frame=end_frame)
+                obj.keyframe_insert(data_path="hide_render", frame=end_frame)
+
+            # --- Stationary Mesh ---
+            # Face is stationary if ALL vertices are stationary (NOT moving)
+            # This ensures no overlap with Moving mesh faces
+            face_stationary_mask = ~face_moving_mask
+            
+            if face_stationary_mask.any():
+                sub_faces = faces[face_stationary_mask]
+                unique_v = np.unique(sub_faces)
                 
-                group.links.new(edge_verts.outputs['Vertex Index 2'], sample_pos2.inputs['Index'])
-                group.links.new(pos.outputs['Position'], sample_pos2.inputs['Value'])
+                remap = np.zeros(len(pts_transformed), dtype=np.int32) - 1
+                remap[unique_v] = np.arange(len(unique_v))
                 
-                # Calculate Distance
-                group.links.new(sample_pos1.outputs['Value'], dist.inputs[0])
-                group.links.new(sample_pos2.outputs['Value'], dist.inputs[1])
+                new_faces = remap[sub_faces]
+                new_pts = pts_transformed[unique_v]
+                new_cols = cols[unique_v]
+                new_confs = confs[unique_v]
+                new_uvs = uvs.reshape(-1, 2)[unique_v]
                 
-                # Compare
-                group.links.new(dist.outputs['Value'], compare_edge.inputs['A'])
-                group.links.new(compare_edge.outputs['Result'], del_edge.inputs['Selection'])
+                if "image_paths" in d and i < len(d["image_paths"]):
+                    base_name = os.path.splitext(os.path.basename(d["image_paths"][i]))[0]
+                    mesh_name = f"Mesh_{base_name}"
+                else:
+                    mesh_name = f"Mesh_Img_{i}"
                 
-                # Connect Main Flow
-                group.links.new(in_node.outputs['Geometry'], del_conf.inputs['Geometry'])
-                group.links.new(del_conf.outputs['Geometry'], del_edge.inputs['Geometry'])
-                group.links.new(del_edge.outputs['Geometry'], out_node.inputs['Geometry'])
+                mesh = bpy.data.meshes.new(name=mesh_name)
+                mesh.from_pydata(new_pts.tolist(), [], new_faces.tolist())
                 
-            mod.node_group = group
+                # UVs
+                uv_layer = mesh.uv_layers.new(name="UVMap")
+                loop_vert_indices = np.zeros(len(mesh.loops), dtype=np.int32)
+                mesh.loops.foreach_get("vertex_index", loop_vert_indices)
+                loop_uvs = new_uvs[loop_vert_indices]
+                uv_layer.data.foreach_set("uv", loop_uvs.flatten())
+                
+                # Attributes
+                col_attr = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
+                col_attr.data.foreach_set("color", new_cols.flatten())
+                conf_attr = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
+                conf_attr.data.foreach_set("value", new_confs)
+                
+                obj = bpy.data.objects.new(mesh_name, mesh)
+                if collection:
+                    collection.objects.link(obj)
+                else:
+                    bpy.context.collection.objects.link(obj)
+                
+                # Material (Image)
+                if "image_paths" in d:
+                    img_path = d["image_paths"][i]
+                    mat = get_or_create_image_material(img_path)
+                else:
+                    mat = get_or_create_point_material()
+                obj.data.materials.append(mat)
+                
+                if filter_edges:
+                    add_filter_mesh_modifier(obj, min_confidence)
+
+    else:
+        for i in range(N):
+            # Prepare data for this image
+            pts = points[i].reshape(-1, 3)
+            # Apply the same coordinate transform as import_point_cloud
+            pts_transformed = pts.copy()
+            pts_transformed[:, [0, 1, 2]] = pts[:, [0, 2, 1]]
+            pts_transformed[:, 2] = -pts_transformed[:, 2]
+            
+            cols = images[i].reshape(-1, 3)
+            cols = np.hstack((cols, np.ones((cols.shape[0], 1)))) # RGBA
+            confs = conf[i].reshape(-1)
+            
+            motion_vals = None
+            if 'motion' in d:
+                motion_vals = d['motion'][i].reshape(-1)
+            
+            # Create Mesh
+            if "image_paths" in d and i < len(d["image_paths"]):
+                base_name = os.path.splitext(os.path.basename(d["image_paths"][i]))[0]
+                mesh_name = f"Mesh_{base_name}"
+            else:
+                mesh_name = f"Mesh_Img_{i}"
+                
+            mesh = bpy.data.meshes.new(name=mesh_name)
+            mesh.from_pydata(pts_transformed.tolist(), [], faces.tolist())
+            
+            # Add UVs
+            uv_layer = mesh.uv_layers.new(name="UVMap")
+            loop_vert_indices = np.zeros(len(mesh.loops), dtype=np.int32)
+            mesh.loops.foreach_get("vertex_index", loop_vert_indices)
+            loop_uvs = uvs[loop_vert_indices]
+            uv_layer.data.foreach_set("uv", loop_uvs.flatten())
+            
+            # Add Attributes
+            # Color
+            col_attr = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
+            col_attr.data.foreach_set("color", cols.flatten())
+            
+            # Confidence
+            conf_attr = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
+            conf_attr.data.foreach_set("value", confs)
+            
+            # Motion
+            if motion_vals is not None:
+                motion_attr = mesh.attributes.new(name="motion", type="FLOAT", domain="POINT")
+                motion_attr.data.foreach_set("value", motion_vals)
+            
+            obj = bpy.data.objects.new(mesh_name, mesh)
+            if collection:
+                collection.objects.link(obj)
+            else:
+                bpy.context.collection.objects.link(obj)
+                
+            # Add Material
+            if "image_paths" in d:
+                img_path = d["image_paths"][i]
+                mat = get_or_create_image_material(img_path)
+            else:
+                mat = get_or_create_point_material()
+            obj.data.materials.append(mat)
+                
+            # Add Geometry Nodes to filter stretched edges and low confidence
+            if filter_edges:
+                add_filter_mesh_modifier(obj, min_confidence)
 
