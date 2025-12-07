@@ -16,6 +16,8 @@ from .utils import (
 )
 
 wm = None
+total_predicted_time = None
+start_time = None
 def start_progress_timer(total):
     global wm, total_predicted_time, start_time
     start_time = time.time()
