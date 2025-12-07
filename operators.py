@@ -45,7 +45,8 @@ def update_progress_timer(expected_time, stage=""):
 
 def end_progress_timer():
     global wm
-    wm.progress_end()
+    if wm is not None:
+        wm.progress_end()
     wm = None
 
 add_on_path = Path(__file__).parent
