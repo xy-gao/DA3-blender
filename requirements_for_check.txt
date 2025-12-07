@@ -14,6 +14,7 @@ unicorn
 requests
 typer
 pillow
+antlr4-python3-runtime==4.9.2
 omegaconf
 # evo
 e3nn
@@ -23,4 +24,6 @@ pillow_heif
 safetensors
 addict
 pycolmap
+ultralytics
+lapx>=0.5.5
 # depth_anything_3

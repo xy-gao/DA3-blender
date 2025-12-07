@@ -131,32 +131,62 @@ def register():
             min=0.01,
             max=1.0,
         )
+        bpy.types.Scene.da3_use_segmentation = bpy.props.BoolProperty(
+            name="Use Segmentation",
+            description="Use YOLO to segment and track objects across frames",
+            default=False,
+        )
+        bpy.types.Scene.da3_segmentation_model = bpy.props.EnumProperty(
+            items=[
+                ("yolov8n-seg", "YOLOv8 Nano", "Lowest accuracy"),
+                ("yolov8l-seg", "YOLOv8 Large", "Balanced speed/accuracy"),
+                ("yolov8x-seg", "YOLOv8 X-Large", "Best accuracy for v8"),
+                ("yolo11n-seg", "YOLO11 Nano", "Newest tiny fast model"),
+                ("yolo11l-seg", "YOLO11 Large", "Newest balanced model"),
+                ("yolo11x-seg", "YOLO11 X-Large", "Newest best accuracy"),
+                ("yoloe-11s-seg-pf", "YOLOE Small PF", "YOLOE Small prompt-free"),
+                ("yoloe-11m-seg-pf", "YOLOE Medium PF", "YOLOE Medium prompt-free"),
+                ("yoloe-11l-seg-pf", "YOLOE Large PF", "Recognise the most objects"),
+            ],
+            name="Seg Model",
+            description="Select segmentation model",
+            default="yoloe-11l-seg-pf",
+        )
+        bpy.types.Scene.da3_segmentation_conf = bpy.props.FloatProperty(
+            name="Seg Confidence",
+            description="Minimum confidence for segmentation",
+            default=0.25,
+            min=0.0,
+            max=1.0,
+        )
     else:
         raise ValueError("installation failed.")
 
 def unregister():
-    if Dependencies.check():
-        from . import operators, panels
-        bpy.utils.unregister_class(operators.DownloadModelOperator)
-        bpy.utils.unregister_class(operators.UnloadModelOperator)
-        bpy.utils.unregister_class(operators.GeneratePointCloudOperator)
-        bpy.utils.unregister_class(panels.DA3Panel)
-        del bpy.types.Scene.da3_input_folder
-        del bpy.types.Scene.da3_model_name
-        del bpy.types.Scene.da3_use_metric
-        del bpy.types.Scene.da3_metric_mode
-        del bpy.types.Scene.da3_process_res
-        del bpy.types.Scene.da3_process_res_method
-        del bpy.types.Scene.da3_use_half_precision
-        del bpy.types.Scene.da3_use_ray_pose
-        del bpy.types.Scene.da3_batch_size
-        del bpy.types.Scene.da3_batch_mode
-        del bpy.types.Scene.da3_filter_edges
-        del bpy.types.Scene.da3_min_confidence
-        del bpy.types.Scene.da3_output_debug_images
-        del bpy.types.Scene.da3_generate_mesh
-        del bpy.types.Scene.da3_detect_motion
-        del bpy.types.Scene.da3_motion_threshold
+    from . import operators, panels
+    bpy.utils.unregister_class(operators.DownloadModelOperator)
+    bpy.utils.unregister_class(operators.UnloadModelOperator)
+    bpy.utils.unregister_class(operators.GeneratePointCloudOperator)
+    bpy.utils.unregister_class(panels.DA3Panel)
+    del bpy.types.Scene.da3_input_folder
+    del bpy.types.Scene.da3_model_name
+    del bpy.types.Scene.da3_use_metric
+    del bpy.types.Scene.da3_metric_mode
+    del bpy.types.Scene.da3_process_res
+    del bpy.types.Scene.da3_process_res_method
+    del bpy.types.Scene.da3_use_half_precision
+    del bpy.types.Scene.da3_use_ray_pose
+    del bpy.types.Scene.da3_batch_size
+    del bpy.types.Scene.da3_batch_mode
+    del bpy.types.Scene.da3_filter_edges
+    del bpy.types.Scene.da3_min_confidence
+    del bpy.types.Scene.da3_output_debug_images
+    del bpy.types.Scene.da3_generate_mesh
+    del bpy.types.Scene.da3_detect_motion
+    del bpy.types.Scene.da3_motion_threshold
+    del bpy.types.Scene.da3_use_segmentation
+    del bpy.types.Scene.da3_segmentation_model
+    del bpy.types.Scene.da3_segmentation_conf
 
 if __name__ == "__main__":
     register()
