@@ -75,6 +75,26 @@ class DownloadModelOperator(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def download_file(self, url, path):
+        """
+        Downloads a model file from the specified URL to the given path.
+
+        This method is intended to be run in a separate thread, as it performs
+        a potentially long-running network operation. It communicates progress
+        and error status to the main thread via the following instance attributes:
+
+        - self.progress: Updated with the current download percentage (0-100).
+        - self.error_message: Set if an error occurs during download.
+        - self.stop_event: A threading.Event used to signal cancellation and to
+          indicate completion.
+
+        Thread safety: Only the above attributes are shared with the main thread.
+        No Blender UI operations are performed in this thread. The main thread
+        should poll these attributes to update the UI or handle errors.
+
+        Args:
+            url (str): The URL to download the model from.
+            path (str): The local filesystem path to save the downloaded file.
+        """
         try:
             print(f"Downloading model {url.split('/')[-2]}...")
             os.makedirs(MODELS_DIR, exist_ok=True)
