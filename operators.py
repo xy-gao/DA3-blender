@@ -96,7 +96,7 @@ class DownloadModelOperator(bpy.types.Operator):
                             self.progress = (bytes_so_far / total_size) * 100
 
             if not self.stop_event.is_set():
-                 self.progress = 100
+                self.progress = 100
 
         except Exception as e:
             self.error_message = f"Failed to download model: {e}"
