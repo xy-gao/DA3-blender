@@ -39,6 +39,9 @@ def start_progress_timer(total):
 
 def update_progress_timer(expected_time, stage=""):
     global wm, total_predicted_time, start_time
+    if not total_predicted_time or total_predicted_time <= 0:
+        print("Warning: total_predicted_time is zero or negative, cannot update progress.")
+        return
     portion = expected_time / total_predicted_time * 100
     wm.progress_update(int(portion))
     print(f"Progress: {stage}, {portion:.2f}%, elapsed: {time.time() - start_time:.2f}s")
