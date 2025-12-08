@@ -243,7 +243,7 @@ def align_batches(all_predictions):
     # We've finished all batches, return a list of aligned predictions
     return aligned_predictions
 
-def convert_prediction_to_dict(prediction, image_paths=None):
+def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images=False):
     predictions = {}
 
     # images is already numpy in your current pipeline
@@ -253,9 +253,94 @@ def convert_prediction_to_dict(prediction, image_paths=None):
     predictions['depth'] = _to_numpy(prediction.depth)
     predictions['extrinsic'] = _to_numpy(prediction.extrinsics)
     predictions['intrinsic'] = _to_numpy(prediction.intrinsics)
-    predictions['conf'] = prediction.conf
+    predictions['conf'] = _to_numpy(prediction.conf)
 
-    if image_paths is not None:
+    if image_paths is not None and output_debug_images:
+        predictions['image_paths'] = image_paths
+        
+        # Save debug images
+        try:
+            import cv2
+            # Create debug directory
+            first_img_dir = os.path.dirname(image_paths[0])
+            debug_dir = os.path.join(first_img_dir, "debug_output")
+            os.makedirs(debug_dir, exist_ok=True)
+            
+            for i, img_path in enumerate(image_paths):
+                base_name = os.path.splitext(os.path.basename(img_path))[0]
+                
+                # Depth
+                depth_map = predictions['depth'][i]
+                # Normalize depth for visualization: 0-255
+                d_min = np.nanmin(depth_map)
+                d_max = np.nanmax(depth_map)
+                if d_max > d_min:
+                    depth_norm = ((depth_map - d_min) / (d_max - d_min) * 255.0).astype(np.uint8)
+                else:
+                    depth_norm = np.zeros_like(depth_map, dtype=np.uint8)
+                
+                depth_filename = os.path.join(debug_dir, f"{base_name}_depth.png")
+                cv2.imwrite(depth_filename, depth_norm)
+                
+                # Confidence
+                conf_map = predictions['conf'][i]
+                # Scale confidence: * 10, clip to 255
+                conf_scaled = np.clip(conf_map * 10.0, 0, 255).astype(np.uint8)
+                
+                conf_filename = os.path.join(debug_dir, f"{base_name}_conf.png")
+                cv2.imwrite(conf_filename, conf_scaled)
+
+                # Color Image
+                color_img = predictions['images'][i]
+                color_img_uint8 = (np.clip(color_img, 0, 1) * 255).astype(np.uint8)
+                color_img_bgr = cv2.cvtColor(color_img_uint8, cv2.COLOR_RGB2BGR)
+                color_filename = os.path.join(debug_dir, f"{base_name}_color.png")
+                cv2.imwrite(color_filename, color_img_bgr)
+
+                # Bad Confidence Overlay
+                H, W = conf_map.shape
+                bad_img = np.zeros((H, W, 4), dtype=np.uint8) # BGRA
+                
+                # Yellow for conf <= 2.0
+                mask_yellow = (conf_map <= 2.0)
+                bad_img[mask_yellow] = [0, 255, 255, 255] # Yellow
+                
+                # Red for conf <= 1.0
+                mask_red = (conf_map <= 1.0)
+                bad_img[mask_red] = [0, 0, 255, 255] # Red
+                
+                # Magenta for conf <= 1.0 adjacent to conf > 1.0
+                mask_good = (conf_map > 1.0)
+                kernel = np.ones((3,3), np.uint8)
+                # Dilate good area to find neighbors
+                dilated_good = cv2.dilate(mask_good.astype(np.uint8), kernel, iterations=1).astype(bool)
+                # Intersection: Is red AND is touched by good
+                mask_magenta = mask_red & dilated_good
+                bad_img[mask_magenta] = [255, 0, 255, 255] # Magenta
+                
+                bad_filename = os.path.join(debug_dir, f"{base_name}_bad.png")
+                cv2.imwrite(bad_filename, bad_img)
+
+                # Depth Gradient
+                grad_x = cv2.Sobel(depth_map, cv2.CV_64F, 1, 0, ksize=3)
+                grad_y = cv2.Sobel(depth_map, cv2.CV_64F, 0, 1, ksize=3)
+                grad_mag = np.sqrt(grad_x**2 + grad_y**2)
+                
+                g_min = np.nanmin(grad_mag)
+                g_max = np.nanmax(grad_mag)
+                if g_max > g_min:
+                    grad_norm = ((grad_mag - g_min) / (g_max - g_min) * 255.0).astype(np.uint8)
+                else:
+                    grad_norm = np.zeros_like(grad_mag, dtype=np.uint8)
+                
+                grad_filename = os.path.join(debug_dir, f"{base_name}_grad.png")
+                cv2.imwrite(grad_filename, grad_norm)
+                
+        except ImportError:
+            print("Warning: cv2 not found, skipping debug image output.")
+        except Exception as e:
+            print(f"Warning: Failed to save debug images: {e}")
+    elif image_paths is not None:
         predictions['image_paths'] = image_paths
     
     print("DEBUG shapes:")
@@ -479,44 +564,7 @@ def combine_base_with_metric_depth(base, metric):
 
     return output
 
-def import_point_cloud(d, collection=None):
-    points = d["world_points_from_depth"]
-    images = d["images"]
-    conf = d["conf"]
-    points_batch = points.reshape(-1, 3)
-    reordered_points_batch = points_batch.copy()
-    reordered_points_batch[:, [0, 1, 2]] = points_batch[:, [0, 2, 1]]
-    reordered_points_batch[:, 2] = -reordered_points_batch[:, 2]
-    points_batch = reordered_points_batch
-    colors_batch = images.reshape(-1, 3)
-    colors_batch = np.hstack((colors_batch, np.ones((colors_batch.shape[0], 1))))
-    conf_batch = conf.reshape(-1)
-    
-    print(f"DEBUG confidence: min={conf_batch.min():.4f}, max={conf_batch.max():.4f}")
-    
-    mesh = bpy.data.meshes.new(name="Points")
-    vertices = points_batch.tolist()
-    mesh.from_pydata(vertices, [], [])
-    
-    # Image colors
-    attribute = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
-    color_values = colors_batch.flatten().tolist()
-    attribute.data.foreach_set("color", color_values)
-    
-    # Raw confidence value
-    attribute_conf = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
-    conf_values = conf_batch.tolist()
-    attribute_conf.data.foreach_set("value", conf_values)
-    
-    obj = bpy.data.objects.new("Points", mesh)
-
-    # Link to the provided collection, or fallback to active collection
-    if collection is not None:
-        collection.objects.link(obj)
-    else:
-        bpy.context.collection.objects.link(obj)
-
-    # Reuse existing PointMaterial or create new one
+def get_or_create_point_material():
     mat = bpy.data.materials.get("PointMaterial")
     if mat is None:
         mat = bpy.data.materials.new(name="PointMaterial")
@@ -583,6 +631,78 @@ def import_point_cloud(d, collection=None):
         links.new(color_ramp.outputs['Color'], mix_node.inputs['B'])
         links.new(mix_node.outputs['Result'], bsdf.inputs['Base Color'])
         links.new(bsdf.outputs['BSDF'], output_node_material.inputs['Surface'])
+    return mat
+
+def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5):
+    points = d["world_points_from_depth"]
+    images = d["images"]
+    conf = d["conf"]
+
+    # Filter confidence based on depth gradient
+    if filter_edges and "depth" in d:
+        try:
+            import cv2
+            depth = d["depth"]
+            for i in range(len(depth)):
+                dm = depth[i]
+                gx = cv2.Sobel(dm, cv2.CV_64F, 1, 0, ksize=3)
+                gy = cv2.Sobel(dm, cv2.CV_64F, 0, 1, ksize=3)
+                mag = np.sqrt(gx**2 + gy**2)
+                mn, mx = np.nanmin(mag), np.nanmax(mag)
+                if mx > mn:
+                    norm = (mag - mn) / (mx - mn)
+                else:
+                    norm = np.zeros_like(mag)
+                
+                # Set confidence to 0 if normalized gradient >= 12/255
+                mask = norm >= (12.0 / 255.0)
+                conf[i][mask] = 0.0
+        except Exception as e:
+            print(f"Failed to filter confidence by gradient: {e}")
+
+    points_batch = points.reshape(-1, 3)
+    reordered_points_batch = points_batch.copy()
+    reordered_points_batch[:, [0, 1, 2]] = points_batch[:, [0, 2, 1]]
+    reordered_points_batch[:, 2] = -reordered_points_batch[:, 2]
+    points_batch = reordered_points_batch
+    colors_batch = images.reshape(-1, 3)
+    colors_batch = np.hstack((colors_batch, np.ones((colors_batch.shape[0], 1))))
+    conf_batch = conf.reshape(-1)
+
+    # Remove points with low confidence
+    if min_confidence > 0:
+        valid_mask = conf_batch >= min_confidence
+        points_batch = points_batch[valid_mask]
+        colors_batch = colors_batch[valid_mask]
+        conf_batch = conf_batch[valid_mask]
+    
+    if len(conf_batch) > 0:
+        print(f"DEBUG confidence: min={conf_batch.min():.4f}, max={conf_batch.max():.4f}")
+    
+    mesh = bpy.data.meshes.new(name="Points")
+    vertices = points_batch.tolist()
+    mesh.from_pydata(vertices, [], [])
+    
+    # Image colors
+    attribute = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
+    color_values = colors_batch.flatten().tolist()
+    attribute.data.foreach_set("color", color_values)
+    
+    # Raw confidence value
+    attribute_conf = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
+    conf_values = conf_batch.tolist()
+    attribute_conf.data.foreach_set("value", conf_values)
+    
+    obj = bpy.data.objects.new("Points", mesh)
+
+    # Link to the provided collection, or fallback to active collection
+    if collection is not None:
+        collection.objects.link(obj)
+    else:
+        bpy.context.collection.objects.link(obj)
+
+    # Reuse existing PointMaterial or create new one
+    mat = get_or_create_point_material()
     
     # Add material to object so it shows up in Shading mode
     obj.data.materials.append(mat)
@@ -668,3 +788,222 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
         cam_obj.matrix_world = Matrix(M.tolist())
         R = Matrix.Rotation(math.radians(-90), 4, 'X')
         cam_obj.matrix_world = R @ cam_obj.matrix_world
+
+def create_image_material(image_path):
+    name = os.path.basename(image_path)
+    mat = bpy.data.materials.get(name)
+    if mat is None:
+        mat = bpy.data.materials.new(name=name)
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        nodes.clear()
+        
+        tex_coord = nodes.new('ShaderNodeTexCoord')
+        tex_coord.location = (-800, 200)
+        
+        tex_image = nodes.new('ShaderNodeTexImage')
+        tex_image.location = (-500, 200)
+        try:
+            # Check if image is already loaded
+            img_name = os.path.basename(image_path)
+            img = bpy.data.images.get(img_name)
+            if img is None:
+                img = bpy.data.images.load(image_path)
+            tex_image.image = img
+        except Exception as e:
+            print(f"Could not load image {image_path}: {e}")
+            
+        bsdf = nodes.new('ShaderNodeBsdfPrincipled')
+        bsdf.location = (-200, 200)
+        bsdf.inputs['Roughness'].default_value = 1.0
+        # Try to set specular to 0 to avoid shiny photos
+        if 'Specular IOR Level' in bsdf.inputs:
+            bsdf.inputs['Specular IOR Level'].default_value = 0.0
+        elif 'Specular' in bsdf.inputs:
+            bsdf.inputs['Specular'].default_value = 0.0
+        
+        output = nodes.new('ShaderNodeOutputMaterial')
+        output.location = (100, 200)
+        
+        links.new(tex_coord.outputs['UV'], tex_image.inputs['Vector'])
+        links.new(tex_image.outputs['Color'], bsdf.inputs['Base Color'])
+        links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
+    return mat
+
+def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence=0.5):
+    points = d["world_points_from_depth"] # [N, H, W, 3]
+    images = d["images"] # [N, H, W, 3]
+    conf = d["conf"] # [N, H, W]
+
+    # Filter confidence based on depth gradient (Same as import_point_cloud)
+    if filter_edges and "depth" in d:
+        try:
+            import cv2
+            depth = d["depth"]
+            for i in range(len(depth)):
+                dm = depth[i]
+                gx = cv2.Sobel(dm, cv2.CV_64F, 1, 0, ksize=3)
+                gy = cv2.Sobel(dm, cv2.CV_64F, 0, 1, ksize=3)
+                mag = np.sqrt(gx**2 + gy**2)
+                mn, mx = np.nanmin(mag), np.nanmax(mag)
+                if mx > mn:
+                    norm = (mag - mn) / (mx - mn)
+                else:
+                    norm = np.zeros_like(mag)
+                
+                # Set confidence to 0 if normalized gradient >= 12/255
+                mask = norm >= (12.0 / 255.0)
+                conf[i][mask] = 0.0
+        except Exception as e:
+            print(f"Failed to filter confidence by gradient: {e}")
+    
+    N, H, W, _ = points.shape
+    
+    # Generate grid faces once (shared for all images in batch)
+    # Grid indices: (r, c) -> r*W + c
+    # Quad: (r, c), (r, c+1), (r+1, c+1), (r+1, c)
+    r = np.arange(H - 1)
+    c = np.arange(W - 1)
+    rr, cc = np.meshgrid(r, c, indexing='ij')
+    v0 = rr * W + cc
+    v1 = rr * W + (cc + 1)
+    v2 = (rr + 1) * W + (cc + 1)
+    v3 = (rr + 1) * W + cc
+    # Blender expects counter-clockwise winding for front faces
+    faces = np.stack([v0, v1, v2, v3], axis=-1).reshape(-1, 4)
+    
+    # Generate UVs once
+    u_coords = np.linspace(0, 1, W, dtype=np.float32)
+    v_coords = np.linspace(1, 0, H, dtype=np.float32) # Top is 1, Bottom is 0
+    uu, vv = np.meshgrid(u_coords, v_coords)
+    uvs = np.stack([uu, vv], axis=-1).reshape(-1, 2)
+
+    for i in range(N):
+        # Prepare data for this image
+        pts = points[i].reshape(-1, 3)
+        # Apply the same coordinate transform as import_point_cloud
+        pts_transformed = pts.copy()
+        pts_transformed[:, [0, 1, 2]] = pts[:, [0, 2, 1]]
+        pts_transformed[:, 2] = -pts_transformed[:, 2]
+        
+        cols = images[i].reshape(-1, 3)
+        cols = np.hstack((cols, np.ones((cols.shape[0], 1)))) # RGBA
+        confs = conf[i].reshape(-1)
+        
+        # Create Mesh
+        if "image_paths" in d and i < len(d["image_paths"]):
+            base_name = os.path.splitext(os.path.basename(d["image_paths"][i]))[0]
+            mesh_name = f"Mesh_{base_name}"
+        else:
+            mesh_name = f"Mesh_Img_{i}"
+            
+        mesh = bpy.data.meshes.new(name=mesh_name)
+        mesh.from_pydata(pts_transformed.tolist(), [], faces.tolist())
+        
+        # Add UVs
+        uv_layer = mesh.uv_layers.new(name="UVMap")
+        loop_vert_indices = np.zeros(len(mesh.loops), dtype=np.int32)
+        mesh.loops.foreach_get("vertex_index", loop_vert_indices)
+        loop_uvs = uvs[loop_vert_indices]
+        uv_layer.data.foreach_set("uv", loop_uvs.flatten())
+        
+        # Add Attributes
+        # Color
+        col_attr = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
+        col_attr.data.foreach_set("color", cols.flatten())
+        
+        # Confidence
+        conf_attr = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
+        conf_attr.data.foreach_set("value", confs)
+        
+        obj = bpy.data.objects.new(mesh_name, mesh)
+        if collection:
+            collection.objects.link(obj)
+        else:
+            bpy.context.collection.objects.link(obj)
+            
+        # Add Material
+        if "image_paths" in d:
+            img_path = d["image_paths"][i]
+            mat = create_image_material(img_path)
+        else:
+            mat = get_or_create_point_material()
+        obj.data.materials.append(mat)
+            
+        # Add Geometry Nodes to filter stretched edges and low confidence
+        if filter_edges:
+            mod = obj.modifiers.new(name="FilterMesh", type='NODES')
+            group_name = "FilterDepthMesh"
+            group = bpy.data.node_groups.get(group_name)
+            if not group:
+                group = bpy.data.node_groups.new(group_name, 'GeometryNodeTree')
+                group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
+                group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
+                
+                # Nodes
+                in_node = group.nodes.new('NodeGroupInput')
+                out_node = group.nodes.new('NodeGroupOutput')
+                
+                # 1. Filter by Confidence (Delete Points)
+                del_conf = group.nodes.new('GeometryNodeDeleteGeometry')
+                del_conf.domain = 'POINT'
+                named_attr = group.nodes.new('GeometryNodeInputNamedAttribute')
+                named_attr.data_type = 'FLOAT'
+                named_attr.inputs['Name'].default_value = "conf"
+                compare_conf = group.nodes.new('FunctionNodeCompare')
+                compare_conf.operation = 'LESS_THAN'
+                compare_conf.inputs['B'].default_value = min_confidence
+                
+                group.links.new(named_attr.outputs['Attribute'], compare_conf.inputs['A'])
+                group.links.new(compare_conf.outputs['Result'], del_conf.inputs['Selection'])
+                
+                # 2. Filter by Edge Length (Delete Edges)
+                del_edge = group.nodes.new('GeometryNodeDeleteGeometry')
+                del_edge.domain = 'EDGE'
+                
+                # Calculate Edge Length manually (Edge Length node name varies)
+                edge_verts = group.nodes.new('GeometryNodeInputMeshEdgeVertices')
+                pos = group.nodes.new('GeometryNodeInputPosition')
+                
+                sample_pos1 = group.nodes.new('GeometryNodeSampleIndex')
+                sample_pos1.data_type = 'FLOAT_VECTOR'
+                sample_pos1.domain = 'POINT'
+                
+                sample_pos2 = group.nodes.new('GeometryNodeSampleIndex')
+                sample_pos2.data_type = 'FLOAT_VECTOR'
+                sample_pos2.domain = 'POINT'
+                
+                dist = group.nodes.new('ShaderNodeVectorMath')
+                dist.operation = 'DISTANCE'
+                
+                compare_edge = group.nodes.new('FunctionNodeCompare')
+                compare_edge.operation = 'GREATER_THAN'
+                compare_edge.inputs['B'].default_value = 0.1 # Threshold for jump (meters)
+                
+                # Connect Geometry (from del_conf)
+                group.links.new(del_conf.outputs['Geometry'], sample_pos1.inputs['Geometry'])
+                group.links.new(del_conf.outputs['Geometry'], sample_pos2.inputs['Geometry'])
+                
+                # Connect Indices and Values
+                group.links.new(edge_verts.outputs['Vertex Index 1'], sample_pos1.inputs['Index'])
+                group.links.new(pos.outputs['Position'], sample_pos1.inputs['Value'])
+                
+                group.links.new(edge_verts.outputs['Vertex Index 2'], sample_pos2.inputs['Index'])
+                group.links.new(pos.outputs['Position'], sample_pos2.inputs['Value'])
+                
+                # Calculate Distance
+                group.links.new(sample_pos1.outputs['Value'], dist.inputs[0])
+                group.links.new(sample_pos2.outputs['Value'], dist.inputs[1])
+                
+                # Compare
+                group.links.new(dist.outputs['Value'], compare_edge.inputs['A'])
+                group.links.new(compare_edge.outputs['Result'], del_edge.inputs['Selection'])
+                
+                # Connect Main Flow
+                group.links.new(in_node.outputs['Geometry'], del_conf.inputs['Geometry'])
+                group.links.new(del_conf.outputs['Geometry'], del_edge.inputs['Geometry'])
+                group.links.new(del_edge.outputs['Geometry'], out_node.inputs['Geometry'])
+                
+            mod.node_group = group
+

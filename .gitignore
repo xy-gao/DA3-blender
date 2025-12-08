@@ -211,3 +211,4 @@ __marimo__/
 /deps_public
 /deps_da3
 /models/*.safetensors
+debug_output/
