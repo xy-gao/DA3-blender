@@ -18,6 +18,8 @@ from .utils import (
 )
 
 wm = None
+total_predicted_time = None
+start_time = None
 def start_progress_timer(total):
     global wm, total_predicted_time, start_time
     start_time = time.time()
@@ -39,13 +41,17 @@ def start_progress_timer(total):
 
 def update_progress_timer(expected_time, stage=""):
     global wm, total_predicted_time, start_time
+    if not total_predicted_time or total_predicted_time <= 0:
+        print("Warning: total_predicted_time is zero or negative, cannot update progress.")
+        return
     portion = expected_time / total_predicted_time * 100
     wm.progress_update(int(portion))
     print(f"Progress: {stage}, {portion:.2f}%, elapsed: {time.time() - start_time:.2f}s")
 
 def end_progress_timer():
     global wm
-    wm.progress_end()
+    if wm is not None:
+        wm.progress_end()
     wm = None
 
 add_on_path = Path(__file__).parent
@@ -375,17 +381,25 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         MetricCombineTime = 0.12
         if current_model_name == base_model_name:
             LoadModelTime = 0
-        BaseTimeEstimate = LoadModelTime + BatchTimePerImage * len(image_paths) + AlignBatchesTime
+        needs_alignment = batch_mode in ("last_frame_overlap", "first_last_overlap")
+        BaseTimeEstimate = LoadModelTime + BatchTimePerImage * len(image_paths)
+        if needs_alignment:
+            BaseTimeEstimate += AlignBatchesTime
         if use_metric:
             MetricTimeEstimate = BaseTimeEstimate + MetricLoadModelTime
-            if batch_mode == "scale_base":
+            if metric_mode == "scale_base":
                 MetricTimeEstimate += MetricBatchTimePerImage * batch_size
             else:
                 MetricTimeEstimate += MetricBatchTimePerImage * len(image_paths)
-            AfterCombineTimeEstimate = MetricTimeEstimate + AlignBatchesTime + MetricCombineTime
+            AfterCombineTimeEstimate = MetricTimeEstimate
+            if needs_alignment:
+                AfterCombineTimeEstimate += AlignBatchesTime
+            AfterCombineTimeEstimate += MetricCombineTime
         else:
             MetricTimeEstimate = BaseTimeEstimate
-            AfterCombineTimeEstimate = BaseTimeEstimate + AlignBatchesTime
+            AfterCombineTimeEstimate = BaseTimeEstimate
+            if needs_alignment:
+                AfterCombineTimeEstimate += AlignBatchesTime
         TotalTimeEstimate = AfterCombineTimeEstimate + AddImagePointsTime*len(image_paths)
         start_progress_timer(TotalTimeEstimate)
         self.report({'INFO'}, "Starting point cloud generation...")

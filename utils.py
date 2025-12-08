@@ -1236,9 +1236,9 @@ def get_or_create_image_material(image_path):
         bsdf.inputs['Roughness'].default_value = 1.0
         # Try to set specular to 0 to avoid shiny photos
         if 'Specular IOR Level' in bsdf.inputs:
-             bsdf.inputs['Specular IOR Level'].default_value = 0.0
+            bsdf.inputs['Specular IOR Level'].default_value = 0.0
         elif 'Specular' in bsdf.inputs:
-             bsdf.inputs['Specular'].default_value = 0.0
+            bsdf.inputs['Specular'].default_value = 0.0
         
         output = nodes.new('ShaderNodeOutputMaterial')
         output.location = (100, 200)
