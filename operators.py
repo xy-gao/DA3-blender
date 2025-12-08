@@ -14,6 +14,7 @@ from .utils import (
     import_mesh_from_depth,
     create_cameras,
     align_batches,
+    compute_motion_scores,
 )
 
 wm = None
@@ -461,6 +462,14 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 all_combined_predictions = aligned_base_predictions
             update_progress_timer(AfterCombineTimeEstimate, "Combined predictions complete")
 
+            # Detect motion
+            detect_motion = getattr(context.scene, "da3_detect_motion", False)
+            if detect_motion:
+                motion_threshold = getattr(context.scene, "da3_motion_threshold", 0.1)
+                self.report({'INFO'}, "Detecting motion...")
+                compute_motion_scores(all_combined_predictions, threshold_ratio=motion_threshold)
+                # update_progress_timer(AfterCombineTimeEstimate + 1.0, "Motion detection complete")
+
             # Add a point cloud for each batch
             for batch_number, batch_prediction in enumerate(all_combined_predictions):
                 batch_indices = all_base_predictions[batch_number][1]
@@ -474,9 +483,9 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 parent_col.children.link(batch_col)
                 
                 if generate_mesh:
-                    import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                    import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
                 else:
-                    import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                    import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
                 
                 create_cameras(combined_predictions, collection=batch_col)
                 end_idx = batch_indices[-1] + 1

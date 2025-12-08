@@ -119,6 +119,18 @@ def register():
             description="Generate independent textured meshes for each input image instead of a point cloud",
             default=False,
         )
+        bpy.types.Scene.da3_detect_motion = bpy.props.BoolProperty(
+            name="Detect Motion",
+            description="Identify and animate moving objects by checking if they're missing in other frames",
+            default=False,
+        )
+        bpy.types.Scene.da3_motion_threshold = bpy.props.FloatProperty(
+            name="Motion Threshold",
+            description="Depth difference ratio to consider as empty space (e.g. 0.1 = 10%)",
+            default=0.1,
+            min=0.01,
+            max=1.0,
+        )
     else:
         raise ValueError("installation failed.")
 
@@ -143,6 +155,8 @@ def unregister():
         del bpy.types.Scene.da3_min_confidence
         del bpy.types.Scene.da3_output_debug_images
         del bpy.types.Scene.da3_generate_mesh
+        del bpy.types.Scene.da3_detect_motion
+        del bpy.types.Scene.da3_motion_threshold
 
 if __name__ == "__main__":
     register()
