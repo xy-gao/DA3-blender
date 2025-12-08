@@ -221,17 +221,25 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         MetricCombineTime = 0.12
         if current_model_name == base_model_name:
             LoadModelTime = 0
-        BaseTimeEstimate = LoadModelTime + BatchTimePerImage * len(image_paths) + AlignBatchesTime
+        needs_alignment = batch_mode in ("last_frame_overlap", "first_last_overlap")
+        BaseTimeEstimate = LoadModelTime + BatchTimePerImage * len(image_paths)
+        if needs_alignment:
+            BaseTimeEstimate += AlignBatchesTime
         if use_metric:
             MetricTimeEstimate = BaseTimeEstimate + MetricLoadModelTime
             if metric_mode == "scale_base":
                 MetricTimeEstimate += MetricBatchTimePerImage * batch_size
             else:
                 MetricTimeEstimate += MetricBatchTimePerImage * len(image_paths)
-            AfterCombineTimeEstimate = MetricTimeEstimate + AlignBatchesTime + MetricCombineTime
+            AfterCombineTimeEstimate = MetricTimeEstimate
+            if needs_alignment:
+                AfterCombineTimeEstimate += AlignBatchesTime
+            AfterCombineTimeEstimate += MetricCombineTime
         else:
             MetricTimeEstimate = BaseTimeEstimate
-            AfterCombineTimeEstimate = BaseTimeEstimate + AlignBatchesTime
+            AfterCombineTimeEstimate = BaseTimeEstimate
+            if needs_alignment:
+                AfterCombineTimeEstimate += AlignBatchesTime
         TotalTimeEstimate = AfterCombineTimeEstimate + AddImagePointsTime*len(image_paths)
         start_progress_timer(TotalTimeEstimate)
         self.report({'INFO'}, "Starting point cloud generation...")
