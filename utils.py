@@ -5,6 +5,7 @@ import bpy
 from mathutils import Matrix
 import math
 import torch
+import cv2
 
 from depth_anything_3.utils.alignment import (
     compute_alignment_mask,
@@ -373,7 +374,7 @@ def compute_motion_scores(predictions, threshold_ratio=0.1):
         b_idx, f_idx = frame_mapping[i]
         predictions[b_idx].motion[f_idx] = full_motion.reshape(H, W)
 
-def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images=False):
+def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images=False, segmentation_data=None, class_names=None):
     predictions = {}
 
     # images is already numpy in your current pipeline
@@ -388,12 +389,93 @@ def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images
     if hasattr(prediction, 'motion'):
         predictions['motion'] = _to_numpy(prediction.motion)
 
+    if class_names is not None:
+        predictions['class_names'] = class_names
+
+    if segmentation_data is not None:
+        # segmentation_data is a list of dicts (one per frame)
+        # { "masks": [M, h, w], "ids": [M], "classes": [M] }
+        # We need to resize masks to match depth map size [H, W]
+        
+        N, H, W = predictions['depth'].shape
+        
+        # We will store a dense ID map for each frame: [N, H, W]
+        # Initialize with -1 (no object)
+        seg_id_map = np.full((N, H, W), -1, dtype=np.int32)
+        
+        # Also store metadata about IDs (class, etc.)
+        # Global map of ID -> Class
+        id_to_class = {}
+        
+        for i in range(N):
+            if i >= len(segmentation_data): break
+            
+            frame_seg = segmentation_data[i]
+            masks = frame_seg.get("masks", [])
+            ids = frame_seg.get("ids", [])
+            classes = frame_seg.get("classes", [])
+            
+            if len(masks) == 0: continue
+            
+            # Pre-load image for debug if needed
+            orig_img = None
+            debug_dir = None
+            if output_debug_images and image_paths is not None and i < len(image_paths):
+                try:
+                    first_img_dir = os.path.dirname(image_paths[0])
+                    debug_dir = os.path.join(first_img_dir, "debug_output")
+                    os.makedirs(debug_dir, exist_ok=True)
+                    orig_img = cv2.imread(image_paths[i])
+                except Exception as e:
+                    print(f"Debug image load failed: {e}")
+            
+            # Resize masks to H, W
+            # masks is [M, h_small, w_small]
+            # We iterate and resize
+            for m_idx, mask in enumerate(masks):
+                # mask is float or bool? YOLO masks are usually float 0..1 or binary
+                # Resize to H, W
+                # cv2.resize expects (W, H)
+                resized_mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_LINEAR)
+                
+                obj_id = ids[m_idx] if len(ids) > m_idx else -1
+                obj_cls = classes[m_idx] if len(classes) > m_idx else -1
+
+                if output_debug_images and orig_img is not None:
+                    try:
+                        # Native mask
+                        h_nat, w_nat = mask.shape
+                        mask_nat_vis = (mask * 255).astype(np.uint8)
+                        cv2.imwrite(os.path.join(debug_dir, f"frame_{i}_obj_{obj_id}_mask_native.png"), mask_nat_vis)
+                        
+                        # Native image
+                        img_nat = cv2.resize(orig_img, (w_nat, h_nat))
+                        cv2.imwrite(os.path.join(debug_dir, f"frame_{i}_obj_{obj_id}_image_native.png"), img_nat)
+                        
+                        # Resized mask
+                        mask_res_vis = (resized_mask * 255).astype(np.uint8)
+                        cv2.imwrite(os.path.join(debug_dir, f"frame_{i}_obj_{obj_id}_mask_resized.png"), mask_res_vis)
+                    except Exception as e:
+                        print(f"Failed to save debug mask: {e}")
+                
+                # Threshold to binary
+                binary_mask = resized_mask > 0.5
+                
+                if obj_id != -1:
+                    id_to_class[obj_id] = obj_cls
+                    # Assign ID to map
+                    # Note: Overlapping masks will overwrite. 
+                    # Ideally we sort by size or something, but YOLO usually handles NMS.
+                    seg_id_map[i][binary_mask] = obj_id
+                    
+        predictions['seg_id_map'] = seg_id_map
+        predictions['id_to_class'] = id_to_class
+
     if image_paths is not None and output_debug_images:
         predictions['image_paths'] = image_paths
         
         # Save debug images
         try:
-            import cv2
             # Create debug directory
             first_img_dir = os.path.dirname(image_paths[0])
             debug_dir = os.path.join(first_img_dir, "debug_output")
@@ -864,7 +946,6 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
     # Filter confidence based on depth gradient
     if filter_edges and "depth" in d:
         try:
-            import cv2
             depth = d["depth"]
             for i in range(len(depth)):
                 dm = depth[i]
@@ -883,7 +964,82 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
         except Exception as e:
             print(f"Failed to filter confidence by gradient: {e}")
 
-    if 'motion' in d:
+    if 'seg_id_map' in d:
+        seg_id_map = d['seg_id_map'] # [N, H, W]
+        id_to_class = d.get('id_to_class', {})
+        class_names = d.get('class_names', {})
+        
+        # Get all unique IDs across the batch
+        unique_ids = np.unique(seg_id_map)
+        
+        # Create a collection for segmented objects
+        seg_collection = None
+        if collection:
+            seg_collection = bpy.data.collections.new("Segmented")
+            collection.children.link(seg_collection)
+        
+        # Process each ID
+        for obj_id in unique_ids:
+            # ID -1 is background/unsegmented
+            is_background = (obj_id == -1)
+            
+            # Collect points for this ID across all frames
+            obj_points = []
+            obj_colors = []
+            obj_confs = []
+            obj_motions = []
+            
+            N = points.shape[0]
+            for i in range(N):
+                # Mask for this ID in this frame
+                mask = (seg_id_map[i] == obj_id)
+                
+                # Also apply confidence filter
+                if min_confidence > 0:
+                    mask = mask & (conf[i] >= min_confidence)
+                
+                if not mask.any(): continue
+                
+                p = points[i][mask]
+                c = images[i][mask]
+                cf = conf[i][mask]
+                
+                # Transform points
+                p_trans = p.copy()
+                p_trans[:, [0, 1, 2]] = p[:, [0, 2, 1]]
+                p_trans[:, 2] = -p_trans[:, 2]
+                
+                # Colors RGBA
+                c = np.hstack((c, np.ones((c.shape[0], 1))))
+                
+                obj_points.append(p_trans)
+                obj_colors.append(c)
+                obj_confs.append(cf)
+                
+                if 'motion' in d:
+                    m = d['motion'][i][mask]
+                    obj_motions.append(m)
+            
+            if not obj_points: continue
+            
+            # Concatenate
+            all_points = np.vstack(obj_points)
+            all_colors = np.vstack(obj_colors)
+            all_confs = np.concatenate(obj_confs)
+            all_motions = np.concatenate(obj_motions) if obj_motions else None
+            
+            # Name
+            if is_background:
+                name = "Background"
+            else:
+                cls_id = id_to_class.get(obj_id, -1)
+                cls_name = class_names.get(cls_id, f"Class_{cls_id}")
+                name = f"{cls_name}_{obj_id}"
+            
+            target_col = seg_collection if seg_collection else collection
+            create_point_cloud_object(name, all_points, all_colors, all_confs, all_motions, target_col)
+
+    elif 'motion' in d:
         motion = d['motion']
         stationary_points = []
         stationary_colors = []
@@ -1006,6 +1162,13 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
     # Optional: get image paths from predictions, if available
     image_paths = predictions.get("image_paths", None)
 
+    # Create Cameras collection
+    target_collection = collection
+    if collection:
+        cameras_col = bpy.data.collections.new("Cameras")
+        collection.children.link(cameras_col)
+        target_collection = cameras_col
+
     T = np.diag([1.0, -1.0, -1.0, 1.0])
     for i in range(num_cameras):
         # Name from image file if available
@@ -1028,8 +1191,8 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
         cam_data.shift_y = (c_y - image_height / 2.0) / image_height
         cam_obj = bpy.data.objects.new(name=cam_name, object_data=cam_data)
 
-        if collection is not None:
-            collection.objects.link(cam_obj)
+        if target_collection is not None:
+            target_collection.objects.link(cam_obj)
         else:
             scene.collection.objects.link(cam_obj)
         
@@ -1166,7 +1329,6 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
     # Filter confidence based on depth gradient (Same as import_point_cloud)
     if filter_edges and "depth" in d:
         try:
-            import cv2
             depth = d["depth"]
             for i in range(len(depth)):
                 dm = depth[i]
@@ -1206,7 +1368,123 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
     uu, vv = np.meshgrid(u_coords, v_coords)
     uvs = np.stack([uu, vv], axis=-1).reshape(-1, 2)
 
-    if 'motion' in d:
+    if 'seg_id_map' in d:
+        seg_id_map = d['seg_id_map']
+        id_to_class = d.get('id_to_class', {})
+        class_names = d.get('class_names', {})
+        
+        # Create Segmented collection
+        seg_collection = None
+        obj_collections = {} # Cache for object collections
+        
+        if collection:
+            seg_collection = bpy.data.collections.new("Segmented_Meshes")
+            collection.children.link(seg_collection)
+            
+        for i in range(N):
+            # Prepare data for this image
+            pts = points[i].reshape(-1, 3)
+            # Apply the same coordinate transform as import_point_cloud
+            pts_transformed = pts.copy()
+            pts_transformed[:, [0, 1, 2]] = pts[:, [0, 2, 1]]
+            pts_transformed[:, 2] = -pts_transformed[:, 2]
+            
+            cols = images[i].reshape(-1, 3)
+            cols = np.hstack((cols, np.ones((cols.shape[0], 1)))) # RGBA
+            confs = conf[i].reshape(-1)
+            
+            motion_vals = None
+            if 'motion' in d:
+                motion_vals = d['motion'][i].reshape(-1)
+            
+            # Flatten IDs for this frame
+            frame_ids = seg_id_map[i].flatten()
+            unique_frame_ids = np.unique(frame_ids)
+            
+            for obj_id in unique_frame_ids:
+                # Mask vertices
+                vert_mask = (frame_ids == obj_id)
+                
+                # Mask faces (strict inclusion)
+                face_mask = vert_mask[faces[:, 0]] & vert_mask[faces[:, 1]] & vert_mask[faces[:, 2]] & vert_mask[faces[:, 3]]
+                
+                if not face_mask.any():
+                    continue
+                
+                # Extract sub-mesh
+                sub_faces = faces[face_mask]
+                unique_v = np.unique(sub_faces)
+                
+                remap = np.zeros(len(pts_transformed), dtype=np.int32) - 1
+                remap[unique_v] = np.arange(len(unique_v))
+                
+                new_faces = remap[sub_faces]
+                new_pts = pts_transformed[unique_v]
+                new_cols = cols[unique_v]
+                new_confs = confs[unique_v]
+                new_uvs = uvs.reshape(-1, 2)[unique_v]
+                
+                # Naming
+                if obj_id == -1:
+                    base_obj_name = "Background"
+                else:
+                    cls_id = id_to_class.get(obj_id, -1)
+                    cls_name = class_names.get(cls_id, f"Class_{cls_id}")
+                    base_obj_name = f"{cls_name}_{obj_id}"
+                
+                if "image_paths" in d and i < len(d["image_paths"]):
+                    base_name = os.path.splitext(os.path.basename(d["image_paths"][i]))[0]
+                    mesh_name = f"{base_name}_{base_obj_name}"
+                else:
+                    mesh_name = f"Mesh_{i}_{base_obj_name}"
+                
+                # Create Mesh object
+                mesh = bpy.data.meshes.new(name=mesh_name)
+                mesh.from_pydata(new_pts.tolist(), [], new_faces.tolist())
+                
+                # UVs
+                uv_layer = mesh.uv_layers.new(name="UVMap")
+                loop_vert_indices = np.zeros(len(mesh.loops), dtype=np.int32)
+                mesh.loops.foreach_get("vertex_index", loop_vert_indices)
+                loop_uvs = new_uvs[loop_vert_indices]
+                uv_layer.data.foreach_set("uv", loop_uvs.flatten())
+                
+                # Attributes
+                col_attr = mesh.attributes.new(name="point_color", type="FLOAT_COLOR", domain="POINT")
+                col_attr.data.foreach_set("color", new_cols.flatten())
+                conf_attr = mesh.attributes.new(name="conf", type="FLOAT", domain="POINT")
+                conf_attr.data.foreach_set("value", new_confs)
+                
+                if motion_vals is not None:
+                    new_motion = motion_vals[unique_v]
+                    motion_attr = mesh.attributes.new(name="motion", type="FLOAT", domain="POINT")
+                    motion_attr.data.foreach_set("value", new_motion)
+                
+                obj = bpy.data.objects.new(mesh_name, mesh)
+                
+                # Determine target collection
+                target_col = collection
+                if seg_collection:
+                    if base_obj_name not in obj_collections:
+                        new_col = bpy.data.collections.new(base_obj_name)
+                        seg_collection.children.link(new_col)
+                        obj_collections[base_obj_name] = new_col
+                    target_col = obj_collections[base_obj_name]
+                
+                target_col.objects.link(obj)
+                
+                # Material (Image)
+                if "image_paths" in d:
+                    img_path = d["image_paths"][i]
+                    mat = get_or_create_image_material(img_path)
+                else:
+                    mat = get_or_create_point_material()
+                obj.data.materials.append(mat)
+                
+                if filter_edges:
+                    add_filter_mesh_modifier(obj, min_confidence)
+
+    elif 'motion' in d:
         motion = d['motion']
         
         # Create Moving collection

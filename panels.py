@@ -53,6 +53,14 @@ class DA3Panel(bpy.types.Panel):
         layout.prop(scene, "da3_detect_motion", text="Detect Motion")
         if scene.da3_detect_motion:
             layout.prop(scene, "da3_motion_threshold", text="Motion Threshold")
+        
+        layout.prop(scene, "da3_use_segmentation")
+        if scene.da3_use_segmentation:
+            layout.prop(scene, "da3_segmentation_model")
+            layout.prop(scene, "da3_segmentation_conf")
+        
+        layout.separator()
+
         layout.prop(scene, "da3_generate_mesh", text="Generate Meshes")
         layout.prop(scene, "da3_output_debug_images", text="Output Debug Images")
         row = layout.row()

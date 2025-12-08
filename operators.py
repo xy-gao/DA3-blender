@@ -64,6 +64,20 @@ _URLS = {
     "da3metric-large": "https://huggingface.co/depth-anything/DA3METRIC-LARGE/resolve/main/model.safetensors",
     "da3mono-large": "https://huggingface.co/depth-anything/DA3MONO-LARGE/resolve/main/model.safetensors",
     "da3nested-giant-large": "https://huggingface.co/depth-anything/DA3NESTED-GIANT-LARGE/resolve/main/model.safetensors",
+
+    "yolov8n-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-seg.pt",
+    "yolov8s-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-seg.pt",
+    "yolov8m-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8m-seg.pt",
+    "yolov8l-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8l-seg.pt",
+    "yolov8x-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8x-seg.pt",
+    "yolo11n-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-seg.pt",
+    "yolo11s-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s-seg.pt",
+    "yolo11m-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11m-seg.pt",
+    "yolo11l-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11l-seg.pt",
+    "yolo11x-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x-seg.pt",
+    "yoloe-11s-seg-pf": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11s-seg-pf.pt",
+    "yoloe-11m-seg-pf": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11m-seg-pf.pt",
+    "yoloe-11l-seg-pf": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11l-seg-pf.pt",
 }
 model = None
 current_model_name = None
@@ -117,6 +131,143 @@ def unload_current_model():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             display_VRAM_usage("after unload")
+
+def run_segmentation(image_paths, conf_threshold=0.25, model_name="yolo11x-seg"):
+    print(f"Loading {model_name} model...")
+    display_VRAM_usage("before loading YOLO")
+    try:
+        from ultralytics import YOLO
+    except ImportError:
+        print("Error: ultralytics not installed. Please install it to use segmentation.")
+        return None, None
+
+    # Use selected model
+    # model_name passed as argument
+    model_path = os.path.join(MODELS_DIR, f"{model_name}.pt")
+    
+    if not os.path.exists(model_path):
+        print(f"Downloading {model_name} to {model_path}...")
+        url = _URLS.get(model_name, "")
+        if not url:
+            print(f"Error: No URL known for {model_name}. Please download {model_name}.pt manually to {MODELS_DIR}")
+            return None, None
+            
+        try:
+            torch.hub.download_url_to_file(url, model_path)
+        except Exception as e:
+            print(f"Failed to download {model_name}: {e}")
+            return None, None
+
+    # Load model from specific path
+    seg_model = YOLO(model_path) 
+    display_VRAM_usage("after loading YOLO", include_peak=True)
+    
+    print(f"Running segmentation on {len(image_paths)} images...")
+    
+    # Run tracking
+    # persist=True is important for video tracking
+    # stream=True returns a generator, good for memory
+    results = seg_model.track(source=image_paths, conf=conf_threshold, persist=True, stream=True, verbose=False)
+    
+    segmentation_data = []
+    
+    for i, r in enumerate(results):
+        # r is a Results object
+        # We need masks and track IDs
+        frame_data = {
+            "masks": [],
+            "ids": [],
+            "classes": [],
+            "orig_shape": r.orig_shape
+        }
+        
+        if r.masks is not None:
+            # masks.data is a torch tensor of masks [N, H, W]
+            masks = r.masks.data.cpu().numpy()
+            
+            # Crop masks to remove letterbox padding (YOLO pads to multiple of 32)
+            # This ensures aspect ratio matches original image before we resize later
+            h_orig, w_orig = r.orig_shape
+            if len(masks.shape) == 3:
+                _, h_mask, w_mask = masks.shape
+                
+                # Calculate scale factor that was used to fit image into mask
+                scale = min(w_mask / w_orig, h_mask / h_orig)
+                
+                # Compute expected dimensions of the valid image area in the mask
+                new_w = int(round(w_orig * scale))
+                new_h = int(round(h_orig * scale))
+                
+                # Compute start offsets (centering)
+                x_off = (w_mask - new_w) // 2
+                y_off = (h_mask - new_h) // 2
+                
+                # Crop
+                masks = masks[:, y_off : y_off + new_h, x_off : x_off + new_w]
+            
+            # Fix edge artifacts (sometimes edges are black)
+            if len(masks.shape) == 3:
+                for k in range(masks.shape[0]):
+                    m = masks[k]
+                    h_m, w_m = m.shape
+                    
+                    # Fix bottom edge
+                    if h_m >= 3:
+                        if np.max(m[-1, :]) == 0:
+                            if np.max(m[-2, :]) == 0:
+                                m[-2:, :] = m[-3, :]
+                            else:
+                                m[-1, :] = m[-2, :]
+
+                    # Fix top edge
+                    if h_m >= 3:
+                        if np.max(m[0, :]) == 0:
+                            if np.max(m[1, :]) == 0:
+                                m[:2, :] = m[2, :]
+                            else:
+                                m[0, :] = m[1, :]
+
+                    # Fix left edge
+                    if w_m >= 3:
+                        if np.max(m[:, 0]) == 0:
+                            if np.max(m[:, 1]) == 0:
+                                m[:, :2] = m[:, 2:3]
+                            else:
+                                m[:, 0] = m[:, 1]
+
+            frame_data["masks"] = masks
+            
+            if r.boxes is not None and r.boxes.id is not None:
+                frame_data["ids"] = r.boxes.id.int().cpu().numpy()
+            else:
+                # If no tracking IDs (e.g. first frame or lost track), use -1 or generate new ones?
+                # If tracking is on, it should return IDs. If not, maybe just detection.
+                # But we requested track().
+                # If no ID, maybe it's a new object that wasn't tracked?
+                # Let's use -1 for untracked
+                if r.boxes is not None:
+                    frame_data["ids"] = np.full(len(r.boxes), -1, dtype=int)
+            
+            if r.boxes is not None:
+                frame_data["classes"] = r.boxes.cls.int().cpu().numpy()
+                
+        segmentation_data.append(frame_data)
+        
+        if i % 10 == 0:
+            print(f"Segmented {i+1}/{len(image_paths)} images")
+
+    display_VRAM_usage("after YOLO inference", include_peak=True)
+    
+    # Get class names
+    class_names = seg_model.names
+
+    # Cleanup
+    del seg_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        display_VRAM_usage("after unloading YOLO")
+        
+    return segmentation_data, class_names
 
 class DownloadModelOperator(bpy.types.Operator):
     bl_idname = "da3.download_model"
@@ -254,6 +405,24 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.report({'INFO'}, "Starting point cloud generation...")
 
         try:
+            # 0) Run Segmentation if enabled
+            all_segmentation_data = None
+            segmentation_class_names = None
+            if getattr(context.scene, "da3_use_segmentation", False):
+                self.report({'INFO'}, "Running segmentation...")
+                # Ensure DA3 model is unloaded
+                unload_current_model()
+                
+                seg_conf = getattr(context.scene, "da3_segmentation_conf", 0.25)
+                seg_model_name = getattr(context.scene, "da3_segmentation_model", "yolo11x-seg")
+                all_segmentation_data, segmentation_class_names = run_segmentation(image_paths, conf_threshold=seg_conf, model_name=seg_model_name)
+                
+                if all_segmentation_data is None:
+                    self.report({'WARNING'}, "Segmentation failed or cancelled. Proceeding without segmentation.")
+                else:
+                    self.report({'INFO'}, "Segmentation complete.")
+                    update_progress_timer(0, "Segmentation complete") # Timer doesn't account for seg yet
+
             # 1) run base model
             self.report({'INFO'}, f"Loading {base_model_name} model...")
             base_model = get_model(base_model_name)
@@ -475,7 +644,18 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 batch_indices = all_base_predictions[batch_number][1]
                 batch_paths = [image_paths[j] for j in batch_indices]
                 
-                combined_predictions = convert_prediction_to_dict(batch_prediction, batch_paths, output_debug_images=output_debug_images)
+                # Extract segmentation data for this batch
+                batch_segmentation = None
+                if all_segmentation_data:
+                    batch_segmentation = [all_segmentation_data[j] for j in batch_indices]
+
+                combined_predictions = convert_prediction_to_dict(
+                    batch_prediction, 
+                    batch_paths, 
+                    output_debug_images=output_debug_images,
+                    segmentation_data=batch_segmentation,
+                    class_names=segmentation_class_names
+                )
                 
                 # Create batch collection
                 batch_col_name = f"{folder_name}_Batch_{batch_number+1}"

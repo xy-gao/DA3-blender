@@ -14,7 +14,8 @@ unicorn
 requests
 typer
 pillow
-omegaconf
+antlr4-python3-runtime==4.9.2 # required by omegaconf 2.3.0, without this line installing antlr4-python3-runtime failed for me, Google Gemini claims it's a known issue in 4.9.3 on Windows
+omegaconf<2.4 # when omegaconf 2.4.0 releases, it will require antlr4-python3-runtime 4.11
 # evo
 e3nn
 moviepy==1.0.3
@@ -23,4 +24,6 @@ pillow_heif
 safetensors
 addict
 pycolmap
+ultralytics # for YOLO image segmentation
+lapx>=0.5.5 # lap is required by ultralytics, but when lap attempted to automatically install, it installed to the wrong python environment
 # depth_anything_3
