@@ -5,6 +5,7 @@ import bpy
 from mathutils import Matrix
 import math
 import torch
+import cv2
 
 from depth_anything_3.utils.alignment import (
     compute_alignment_mask,
@@ -395,7 +396,6 @@ def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images
         # segmentation_data is a list of dicts (one per frame)
         # { "masks": [M, h, w], "ids": [M], "classes": [M] }
         # We need to resize masks to match depth map size [H, W]
-        import cv2
         
         N, H, W = predictions['depth'].shape
         
@@ -476,7 +476,6 @@ def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images
         
         # Save debug images
         try:
-            import cv2
             # Create debug directory
             first_img_dir = os.path.dirname(image_paths[0])
             debug_dir = os.path.join(first_img_dir, "debug_output")
@@ -947,7 +946,6 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
     # Filter confidence based on depth gradient
     if filter_edges and "depth" in d:
         try:
-            import cv2
             depth = d["depth"]
             for i in range(len(depth)):
                 dm = depth[i]
@@ -1331,7 +1329,6 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
     # Filter confidence based on depth gradient (Same as import_point_cloud)
     if filter_edges and "depth" in d:
         try:
-            import cv2
             depth = d["depth"]
             for i in range(len(depth)):
                 dm = depth[i]
