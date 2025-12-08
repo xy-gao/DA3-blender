@@ -226,7 +226,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         BaseTimeEstimate = LoadModelTime + BatchTimePerImage * len(image_paths) + AlignBatchesTime
         if use_metric:
             MetricTimeEstimate = BaseTimeEstimate + MetricLoadModelTime
-            if batch_mode == "scale_base":
+            if metric_mode == "scale_base":
                 MetricTimeEstimate += MetricBatchTimePerImage * batch_size
             else:
                 MetricTimeEstimate += MetricBatchTimePerImage * len(image_paths)
