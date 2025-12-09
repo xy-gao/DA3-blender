@@ -58,8 +58,7 @@ class DA3Panel(bpy.types.Panel):
         if scene.da3_use_segmentation:
             layout.prop(scene, "da3_segmentation_model")
             layout.prop(scene, "da3_segmentation_conf")
-        
-        layout.separator()
+            layout.separator()
 
         layout.prop(scene, "da3_generate_mesh", text="Generate Meshes")
         layout.prop(scene, "da3_output_debug_images", text="Output Debug Images")
@@ -67,3 +66,8 @@ class DA3Panel(bpy.types.Panel):
         row.operator("da3.generate_point_cloud")
         row = layout.row()
         row.operator("da3.unload_model")
+
+        # Progress bar
+        if context.scene.da3_progress >= 0 and context.scene.da3_progress <= 100:
+            layout.label(text=context.scene.da3_progress_stage)
+            layout.progress(factor=context.scene.da3_progress / 100.0)
