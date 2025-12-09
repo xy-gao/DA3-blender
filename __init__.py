@@ -10,6 +10,7 @@ bl_info = {
 
 import bpy
 from .dependencies import Dependencies
+import os
 
 class DA3InstallDepsOperator(bpy.types.Operator):
     bl_idname = "da3.install_dependencies"
@@ -40,6 +41,7 @@ class DA3AddonPreferences(bpy.types.AddonPreferences):
 def register_classes():
     from . import operators, panels
     bpy.utils.register_class(operators.DownloadModelOperator)
+    bpy.utils.register_class(operators.UnloadModelOperator)
     bpy.utils.register_class(operators.GeneratePointCloudOperator)
     bpy.utils.register_class(panels.DA3Panel)
     bpy.types.Scene.da3_input_folder = bpy.props.StringProperty(subtype='DIR_PATH')
@@ -49,33 +51,180 @@ def register_classes():
             ('da3-base', 'DA3 Base', 'Base model with balanced performance'),
             ('da3-large', 'DA3 Large', 'Large model for better quality'),
             ('da3-giant', 'DA3 Giant', 'Giant model for highest quality'),
+            ("da3metric-large", "DA3 Metric Large", "Metric depth model"),
+            ('da3mono-large', 'DA3 Mono Large', 'Single image depth estimation'),
+            ('da3nested-giant-large', 'DA3 Nested Giant Large', 'Nested depth estimation'),
         ],
         name="Model",
         description="Select DA3 model variant",
         default='da3-large'
     )
+    bpy.types.Scene.da3_use_metric = bpy.props.BoolProperty(
+        name="Use Metric",
+        description="Real-world scale using the metric DA3 model",
+        default=False,
+    )
+    bpy.types.Scene.da3_metric_mode = bpy.props.EnumProperty(
+        items=[
+            ("scale_base", "Scale Base Depth", "Scale base depth using metric model"),
+            ("metric_depth", "Use Metric Depth", "Use metric model depth with base cameras"),
+        ],
+        name="Metric Mode",
+        description="How to combine base and metric model outputs",
+        default="scale_base",
+    )
+    bpy.types.Scene.da3_process_res = bpy.props.IntProperty(
+        name="Process Resolution",
+        description="Internal resolution for processing (must be multiple of 14)",
+        default=504,
+        min=14
+    )
+    bpy.types.Scene.da3_process_res_method = bpy.props.EnumProperty(
+        items=[
+            ("upper_bound_resize", "Upper Bound Resize", "Resize so that the specified dimension becomes the longer side"),
+            ("lower_bound_resize", "Lower Bound Resize", "Resize so that the specified dimension becomes the shorter side"),
+        ],
+        name="Resize Method",
+        description="Method for resizing images to the target resolution",
+        default="upper_bound_resize"
+    )
+    bpy.types.Scene.da3_use_half_precision = bpy.props.BoolProperty(
+        name="Use Half Precision",
+        description="Use 16-bit floats for reduced VRAM usage",
+        default=False,
+    )
+    bpy.types.Scene.da3_use_ray_pose = bpy.props.BoolProperty(
+        name="Use Ray-based Pose",
+        description="Use ray-based camera pose estimation instead of the camera decoder (slower but potentially more accurate)",
+        default=False,
+    )
     bpy.types.Scene.da3_batch_size = bpy.props.IntProperty(
         name="Batch Size",
         description="Number of images to process in a single batch",
-        default=1,
-        min=1,
-        max=16
+        default=10,
+        min=1
+    )
+    bpy.types.Scene.da3_batch_mode = bpy.props.EnumProperty(
+        items=[
+            ("ignore_batch_size", "Ignore Batch Size", "Process all images (may use excessive VRAM)"),
+            ("skip_frames", "Skip Frames", "Process evenly spaced frames"),
+            ("last_frame_overlap", "Last Frame Overlap", "Process overlapping batches for large datasets"),
+            ("first_last_overlap", "First+Last Overlap", "Use first and last frame of previous batch plus new frames"),
+            ("no_overlap", "No Overlap", "You will have to align batches manually"),
+        ],
+        name="Batch Mode",
+        description="How to select images for processing",
+        default="skip_frames"
+    )
+    bpy.types.Scene.da3_filter_edges = bpy.props.BoolProperty(
+        name="Filter Edges",
+        description="Set confidence to 0 for pixels with high depth gradient",
+        default=True,
+    )
+    bpy.types.Scene.da3_min_confidence = bpy.props.FloatProperty(
+        name="Min Confidence",
+        description="Minimum confidence threshold for points (points below this will be removed)",
+        default=0.5,
+        min=0.0,
+        max=100.0,
+    )
+    bpy.types.Scene.da3_output_debug_images = bpy.props.BoolProperty(
+        name="Output Debug Images",
+        description="Save debug images (depth, confidence, etc.) to a subfolder",
+        default=False,
+    )
+    bpy.types.Scene.da3_generate_mesh = bpy.props.BoolProperty(
+        name="Generate Meshes",
+        description="Generate independent textured meshes for each input image instead of a point cloud",
+        default=False,
+    )
+    bpy.types.Scene.da3_detect_motion = bpy.props.BoolProperty(
+        name="Detect Motion",
+        description="Identify and animate moving objects by checking if they're missing in other frames",
+        default=False,
+    )
+    bpy.types.Scene.da3_motion_threshold = bpy.props.FloatProperty(
+        name="Motion Threshold",
+        description="Depth difference ratio to consider as empty space (e.g. 0.1 = 10%)",
+        default=0.1,
+        min=0.01,
+        max=1.0,
+    )
+    bpy.types.Scene.da3_use_segmentation = bpy.props.BoolProperty(
+        name="Use Segmentation",
+        description="Use YOLO to segment and track objects across frames",
+        default=False,
+    )
+    bpy.types.Scene.da3_segmentation_model = bpy.props.EnumProperty(
+        items=[
+            ("yolov8n-seg", "YOLOv8 Nano", "Lowest accuracy"),
+            ("yolov8l-seg", "YOLOv8 Large", "Balanced speed/accuracy"),
+            ("yolov8x-seg", "YOLOv8 X-Large", "Best accuracy for v8"),
+            ("yolo11n-seg", "YOLO11 Nano", "Newest tiny fast model"),
+            ("yolo11l-seg", "YOLO11 Large", "Newest balanced model"),
+            ("yolo11x-seg", "YOLO11 X-Large", "Newest best accuracy"),
+            ("yoloe-11s-seg-pf", "YOLOE Small PF", "YOLOE Small prompt-free"),
+            ("yoloe-11m-seg-pf", "YOLOE Medium PF", "YOLOE Medium prompt-free"),
+            ("yoloe-11l-seg-pf", "YOLOE Large PF", "Recognise the most objects"),
+        ],
+        name="Seg Model",
+        description="Select segmentation model",
+        default="yoloe-11l-seg-pf",
+    )
+    bpy.types.Scene.da3_segmentation_conf = bpy.props.FloatProperty(
+        name="Seg Confidence",
+        description="Minimum confidence for segmentation",
+        default=0.25,
+        min=0.0,
+        max=1.0,
     )
     bpy.types.Scene.da3_progress = bpy.props.FloatProperty(
         name="Progress",
         subtype='PERCENTAGE',
-        default=0.0,
-        min=0.0,
+        default=-1.0,
+        min=-1.0,
         max=100.0
     )
 
 def unregister_classes():
     from . import operators, panels
     bpy.utils.unregister_class(operators.DownloadModelOperator)
+    bpy.utils.unregister_class(operators.UnloadModelOperator)
     bpy.utils.unregister_class(operators.GeneratePointCloudOperator)
     bpy.utils.unregister_class(panels.DA3Panel)
     del bpy.types.Scene.da3_input_folder
     del bpy.types.Scene.da3_model_name
+    del bpy.types.Scene.da3_use_metric
+    del bpy.types.Scene.da3_metric_mode
+    del bpy.types.Scene.da3_process_res
+    del bpy.types.Scene.da3_process_res_method
+    del bpy.types.Scene.da3_use_half_precision
+    del bpy.types.Scene.da3_use_ray_pose
+    del bpy.types.Scene.da3_batch_size
+    del bpy.types.Scene.da3_batch_mode
+    del bpy.types.Scene.da3_filter_edges
+    del bpy.types.Scene.da3_min_confidence
+    del bpy.types.Scene.da3_output_debug_images
+    del bpy.types.Scene.da3_generate_mesh
+    del bpy.types.Scene.da3_detect_motion
+    del bpy.types.Scene.da3_motion_threshold
+    del bpy.types.Scene.da3_use_segmentation
+    del bpy.types.Scene.da3_segmentation_model
+    del bpy.types.Scene.da3_segmentation_conf
+    del bpy.types.Scene.da3_progress
+
+class DA3InstallDepsPanel(bpy.types.Panel):
+    bl_label = "DA3 Dependencies"
+    bl_idname = "VIEW3D_PT_da3_deps"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "DA3"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Dependencies are not installed.")
+        layout.operator(DA3InstallDepsOperator.bl_idname)
+        layout.label(text="Please check Blender System Console for details.")
 
 classes = [
     DA3AddonPreferences,
@@ -88,10 +237,14 @@ def register():
 
     if Dependencies.check():
         register_classes()
+    else:
+        bpy.utils.register_class(DA3InstallDepsPanel)
 
 def unregister():
     if Dependencies.check():
         unregister_classes()
+    else:
+        bpy.utils.unregister_class(DA3InstallDepsPanel)
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
