@@ -67,3 +67,7 @@ class DA3Panel(bpy.types.Panel):
         row.operator("da3.generate_point_cloud")
         row = layout.row()
         row.operator("da3.unload_model")
+
+        # Progress bar
+        if context.scene.da3_progress >= 0 and context.scene.da3_progress <= 100:
+            layout.progress(factor=context.scene.da3_progress / 100.0)

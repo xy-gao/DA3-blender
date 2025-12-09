@@ -300,41 +300,22 @@ class DownloadModelOperator(bpy.types.Operator):
             self.report({'ERROR'}, f"Unknown model: {model_name}")
             return {'CANCELLED'}
 
+        context.scene.da3_progress = 0
         self.progress = 0
         self.error_message = ""
         self.stop_event = threading.Event()
 
-        self.thread = threading.Thread(target=self.download_file, args=(_URLS[model_name], self.model_path))
+        self.thread = threading.Thread(target=self.download_file, args=(_URLS[model_name], self.model_path, context))
         self.thread.start()
 
         wm = context.window_manager
-        wm.progress_begin(0, 100)
+        # wm.progress_begin(0, 100)
         self.timer = wm.event_timer_add(0.1, window=context.window)
         wm.modal_handler_add(self)
 
         return {'RUNNING_MODAL'}
 
-    def download_file(self, url, path):
-        """
-        Downloads a model file from the specified URL to the given path.
-
-        This method is intended to be run in a separate thread, as it performs
-        a potentially long-running network operation. It communicates progress
-        and error status to the main thread via the following instance attributes:
-
-        - self.progress: Updated with the current download percentage (0-100).
-        - self.error_message: Set if an error occurs during download.
-        - self.stop_event: A threading.Event used to signal cancellation and to
-          indicate completion.
-
-        Thread safety: Only the above attributes are shared with the main thread.
-        No Blender UI operations are performed in this thread. The main thread
-        should poll these attributes to update the UI or handle errors.
-
-        Args:
-            url (str): The URL to download the model from.
-            path (str): The local filesystem path to save the downloaded file.
-        """
+    def download_file(self, url, path, context):
         try:
             print(f"Downloading model {url.split('/')[-2]}...")
             os.makedirs(MODELS_DIR, exist_ok=True)
@@ -356,7 +337,7 @@ class DownloadModelOperator(bpy.types.Operator):
                             self.progress = (bytes_so_far / total_size) * 100
 
             if not self.stop_event.is_set():
-                self.progress = 100
+                 self.progress = 100
 
         except Exception as e:
             self.error_message = f"Failed to download model: {e}"
@@ -365,10 +346,13 @@ class DownloadModelOperator(bpy.types.Operator):
 
     def modal(self, context, event):
         if event.type == 'TIMER':
+            # context.window_manager.progress_update(self.progress)
+            context.scene.da3_progress = self.progress
             if self.stop_event.is_set() and not self.thread.is_alive():
                 wm = context.window_manager
                 wm.event_timer_remove(self.timer)
-                wm.progress_end()
+                # wm.progress_end()
+                context.scene.da3_progress = -1
 
                 if self.error_message:
                     self.report({'ERROR'}, self.error_message)
@@ -379,20 +363,20 @@ class DownloadModelOperator(bpy.types.Operator):
                 model_name = context.scene.da3_model_name
                 self.report({'INFO'}, f"Model {model_name} downloaded successfully.")
 
-                for area in bpy.context.screen.areas:
+                for area in context.screen.areas:
                     if area.type == 'VIEW_3D':
                         area.tag_redraw()
 
                 return {'FINISHED'}
 
-            context.window_manager.progress_update(self.progress)
 
         elif event.type in {'RIGHTMOUSE', 'ESC'}:
             self.stop_event.set()
+            context.scene.da3_progress = -1
 
             wm = context.window_manager
             wm.event_timer_remove(self.timer)
-            wm.progress_end()
+            # wm.progress_end()
 
             self.report({'WARNING'}, "Download cancelled.")
 
@@ -469,22 +453,23 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             self.report({'ERROR'}, "Please select a valid input folder.")
             return {'CANCELLED'}
 
+        context.scene.da3_progress = 0
         self.progress = 0
         self.error_message = ""
         self.stop_event = threading.Event()
         self.result_queue = queue.Queue()
 
-        self.thread = threading.Thread(target=self.generate_worker)
+        self.thread = threading.Thread(target=self.generate_worker, args=(context,))
         self.thread.start()
 
         wm = context.window_manager
-        wm.progress_begin(0, 100)
+        # wm.progress_begin(0, 100)
         self.timer = wm.event_timer_add(0.1, window=context.window)
         wm.modal_handler_add(self)
 
         return {'RUNNING_MODAL'}
 
-    def generate_worker(self):
+    def generate_worker(self, context):
         try:
             # Get image paths
             import glob
@@ -535,9 +520,9 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             # start_progress_timer(TotalTimeEstimate)
 
             def progress_callback(progress_value):
+                self.progress = progress_value
                 if self.stop_event.is_set():
                     return True
-                self.progress = progress_value
                 return False
 
             # 0) Run Segmentation
@@ -563,7 +548,19 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             
             all_base_predictions = []
             
-            if self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+            if self.batch_mode == "no_overlap":
+                num_batches = (len(self.image_paths) + self.batch_size - 1) // self.batch_size
+                for batch_idx in range(num_batches):
+                    start_idx = batch_idx * self.batch_size
+                    end_idx = min(start_idx + self.batch_size, len(self.image_paths))
+                    batch_paths = self.image_paths[start_idx:end_idx]
+                    batch_indices = list(range(start_idx, end_idx))
+                    print(f"Batch {batch_idx + 1}/{num_batches}:")
+                    prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                    # update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
+                    all_base_predictions.append((prediction, batch_indices))
+
+            elif self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
                 if self.batch_mode == "last_frame_overlap":
                     step = self.batch_size - 1
                     num_batches = (len(self.image_paths) + step - 1) // step  # Ceiling division
@@ -666,7 +663,19 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         all_metric_predictions.append((prediction, batch_indices.copy()))
                     else:
                         # For other metric modes, keep previous batching behaviour
-                        if self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+                        if self.batch_mode == "no_overlap":
+                            num_batches = (len(self.image_paths) + self.batch_size - 1) // self.batch_size
+                            for batch_idx in range(num_batches):
+                                start_idx = batch_idx * self.batch_size
+                                end_idx = min(start_idx + self.batch_size, len(self.image_paths))
+                                batch_paths = self.image_paths[start_idx:end_idx]
+                                batch_indices = list(range(start_idx, end_idx))
+                                print(f"Batch {batch_idx + 1}/{num_batches}:")
+                                prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                                # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end_idx * MetricBatchTimePerImage, f"Metric batch {batch_idx + 1}")
+                                all_metric_predictions.append((prediction, batch_indices))
+
+                        elif self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
                             # Process in overlapping batches for metric too (mirror base logic)
                             if self.batch_mode == "last_frame_overlap":
                                 step = self.batch_size - 1
@@ -802,6 +811,8 @@ class GeneratePointCloudOperator(bpy.types.Operator):
 
     def modal(self, context, event):
         if event.type == 'TIMER':
+            context.scene.da3_progress = self.progress
+            # context.window_manager.progress_update(self.progress)
             while not self.result_queue.empty():
                 try:
                     msg = self.result_queue.get_nowait()
@@ -815,9 +826,8 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 
                 elif msg["type"] == "INIT_COLLECTION":
                     folder_name = msg["folder_name"]
-                    if folder_name not in bpy.data.collections:
-                        parent_col = bpy.data.collections.new(folder_name)
-                        context.scene.collection.children.link(parent_col)
+                    self.parent_col = bpy.data.collections.new(folder_name)
+                    context.scene.collection.children.link(self.parent_col)
                 
                 elif msg["type"] == "BATCH_READY":
                     self.process_batch(context, msg)
@@ -830,8 +840,6 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             if self.stop_event.is_set() and not self.thread.is_alive() and self.result_queue.empty():
                 self.cleanup(context)
                 return {'FINISHED'}
-                
-            context.window_manager.progress_update(self.progress)
 
         elif event.type in {'RIGHTMOUSE', 'ESC'}:
             self.stop_event.set()
@@ -850,7 +858,8 @@ class GeneratePointCloudOperator(bpy.types.Operator):
     def cleanup(self, context):
         wm = context.window_manager
         wm.event_timer_remove(self.timer)
-        wm.progress_end()
+        # wm.progress_end()
+        context.scene.da3_progress = -1
 
     def process_batch(self, context, msg):
         try:
@@ -862,7 +871,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             filter_edges = msg["filter_edges"]
             min_confidence = msg["min_confidence"]
             
-            parent_col = bpy.data.collections.get(folder_name)
+            parent_col = self.parent_col
             if not parent_col:
                 parent_col = bpy.data.collections.new(folder_name)
                 context.scene.collection.children.link(parent_col)
