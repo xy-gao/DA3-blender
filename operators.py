@@ -3,9 +3,59 @@ from pathlib import Path
 import os
 import torch
 import numpy as np
-from .utils import run_model, import_point_cloud, create_cameras
+import time
+import datetime
+from .utils import (
+    run_model,
+    convert_prediction_to_dict,
+    combine_base_and_metric,
+    combine_base_with_metric_depth,
+    import_point_cloud,
+    import_mesh_from_depth,
+    create_cameras,
+    align_batches,
+    compute_motion_scores,
+)
 import urllib.request
 import threading
+import queue
+
+wm = None
+total_predicted_time = None
+start_time = None
+def start_progress_timer(total):
+    global wm, total_predicted_time, start_time
+    start_time = time.time()
+    wm = bpy.context.window_manager
+    total_predicted_time = total
+    wm.progress_begin(0, 100)
+    
+    # Calculate estimated duration and finish time
+    minutes = int(total // 60)
+    seconds = int(total % 60)
+    if minutes > 0:
+        duration_str = f"{minutes} minutes {seconds} seconds"
+    else:
+        duration_str = f"{seconds} seconds"
+    
+    finish_time = datetime.datetime.now() + datetime.timedelta(seconds=total)
+    finish_str = finish_time.strftime("%H:%M:%S")
+    print(f"Rough estimated duration: {duration_str}, expected finish at {finish_str}")
+
+def update_progress_timer(expected_time, stage=""):
+    global wm, total_predicted_time, start_time
+    if not total_predicted_time or total_predicted_time <= 0:
+        print("Warning: total_predicted_time is zero or negative, cannot update progress.")
+        return
+    portion = expected_time / total_predicted_time * 100
+    wm.progress_update(int(portion))
+    print(f"Progress: {stage}, {portion:.2f}%, elapsed: {time.time() - start_time:.2f}s")
+
+def end_progress_timer():
+    global wm
+    if wm is not None:
+        wm.progress_end()
+    wm = None
 
 add_on_path = Path(__file__).parent
 MODELS_DIR = os.path.join(add_on_path, 'models')
@@ -14,6 +64,23 @@ _URLS = {
     'da3-base': "https://huggingface.co/depth-anything/DA3-BASE/resolve/main/model.safetensors",
     'da3-large': "https://huggingface.co/depth-anything/DA3-LARGE/resolve/main/model.safetensors",
     'da3-giant': "https://huggingface.co/depth-anything/DA3-GIANT/resolve/main/model.safetensors",
+    "da3metric-large": "https://huggingface.co/depth-anything/DA3METRIC-LARGE/resolve/main/model.safetensors",
+    "da3mono-large": "https://huggingface.co/depth-anything/DA3MONO-LARGE/resolve/main/model.safetensors",
+    "da3nested-giant-large": "https://huggingface.co/depth-anything/DA3NESTED-GIANT-LARGE/resolve/main/model.safetensors",
+
+    "yolov8n-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-seg.pt",
+    "yolov8s-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-seg.pt",
+    "yolov8m-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8m-seg.pt",
+    "yolov8l-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8l-seg.pt",
+    "yolov8x-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8x-seg.pt",
+    "yolo11n-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n-seg.pt",
+    "yolo11s-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s-seg.pt",
+    "yolo11m-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11m-seg.pt",
+    "yolo11l-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11l-seg.pt",
+    "yolo11x-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11x-seg.pt",
+    "yoloe-11s-seg-pf": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11s-seg-pf.pt",
+    "yoloe-11m-seg-pf": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11m-seg-pf.pt",
+    "yoloe-11l-seg-pf": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11l-seg-pf.pt",
 }
 model = None
 current_model_name = None
@@ -21,10 +88,26 @@ current_model_name = None
 def get_model_path(model_name):
     return os.path.join(MODELS_DIR, f'{model_name}.safetensors')
 
+def display_VRAM_usage(stage: str, include_peak=False):
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**2
+        free, total = torch.cuda.mem_get_info()
+        free_mb = free / 1024**2
+        total_mb = total / 1024**2
+        msg = f"VRAM {stage}: {allocated:.1f} MB (free: {free_mb:.1f} MB / {total_mb:.1f} MB)"
+        if include_peak:
+            peak = torch.cuda.max_memory_allocated() / 1024**2
+            msg += f" (peak: {peak:.1f} MB)"
+        print(msg)
+
+
 def get_model(model_name):
     global model, current_model_name
     if model is None or current_model_name != model_name:
         from depth_anything_3.api import DepthAnything3
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        display_VRAM_usage(f"before loading {model_name}")
         model = DepthAnything3(model_name=model_name)
         model_path = get_model_path(model_name)
         if os.path.exists(model_path):
@@ -37,11 +120,168 @@ def get_model(model_name):
         model.to(device)
         model.eval()
         current_model_name = model_name
+        display_VRAM_usage(f"after loading {model_name}", include_peak=True)
     return model
+
+def unload_current_model():
+    global model, current_model_name
+    if model is not None:
+        display_VRAM_usage("before unload")
+        # Drop references so PyTorch can free memory
+        del model
+        model = None
+        current_model_name = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            display_VRAM_usage("after unload")
+
+def run_segmentation(image_paths, conf_threshold=0.25, model_name="yolo11x-seg"):
+    print(f"Loading {model_name} model...")
+    display_VRAM_usage("before loading YOLO")
+    try:
+        from ultralytics import YOLO
+    except ImportError:
+        print("Error: ultralytics not installed. Please install it to use segmentation.")
+        return None, None
+
+    # Use selected model
+    # model_name passed as argument
+    model_path = os.path.join(MODELS_DIR, f"{model_name}.pt")
+    
+    if not os.path.exists(model_path):
+        print(f"Downloading {model_name} to {model_path}...")
+        url = _URLS.get(model_name, "")
+        if not url:
+            print(f"Error: No URL known for {model_name}. Please download {model_name}.pt manually to {MODELS_DIR}")
+            return None, None
+            
+        try:
+            torch.hub.download_url_to_file(url, model_path)
+        except Exception as e:
+            print(f"Failed to download {model_name}: {e}")
+            return None, None
+
+    # Load model from specific path
+    seg_model = YOLO(model_path) 
+    display_VRAM_usage("after loading YOLO", include_peak=True)
+    
+    print(f"Running segmentation on {len(image_paths)} images...")
+    
+    # Run tracking
+    # persist=True is important for video tracking
+    # stream=True returns a generator, good for memory
+    results = seg_model.track(source=image_paths, conf=conf_threshold, persist=True, stream=True, verbose=False)
+    
+    segmentation_data = []
+    
+    for i, r in enumerate(results):
+        # r is a Results object
+        # We need masks and track IDs
+        frame_data = {
+            "masks": [],
+            "ids": [],
+            "classes": [],
+            "orig_shape": r.orig_shape
+        }
+        
+        if r.masks is not None:
+            # masks.data is a torch tensor of masks [N, H, W]
+            masks = r.masks.data.cpu().numpy()
+            
+            # Crop masks to remove letterbox padding (YOLO pads to multiple of 32)
+            # This ensures aspect ratio matches original image before we resize later
+            h_orig, w_orig = r.orig_shape
+            if len(masks.shape) == 3:
+                _, h_mask, w_mask = masks.shape
+                
+                # Calculate scale factor that was used to fit image into mask
+                scale = min(w_mask / w_orig, h_mask / h_orig)
+                
+                # Compute expected dimensions of the valid image area in the mask
+                new_w = int(round(w_orig * scale))
+                new_h = int(round(h_orig * scale))
+                
+                # Compute start offsets (centering)
+                x_off = (w_mask - new_w) // 2
+                y_off = (h_mask - new_h) // 2
+                
+                # Crop
+                masks = masks[:, y_off : y_off + new_h, x_off : x_off + new_w]
+            
+            # Fix edge artifacts (sometimes edges are black)
+            if len(masks.shape) == 3:
+                for k in range(masks.shape[0]):
+                    m = masks[k]
+                    h_m, w_m = m.shape
+                    
+                    # Fix bottom edge
+                    if h_m >= 3:
+                        if np.max(m[-1, :]) == 0:
+                            if np.max(m[-2, :]) == 0:
+                                m[-2:, :] = m[-3, :]
+                            else:
+                                m[-1, :] = m[-2, :]
+
+                    # Fix top edge
+                    if h_m >= 3:
+                        if np.max(m[0, :]) == 0:
+                            if np.max(m[1, :]) == 0:
+                                m[:2, :] = m[2, :]
+                            else:
+                                m[0, :] = m[1, :]
+
+                    # Fix left edge
+                    if w_m >= 3:
+                        if np.max(m[:, 0]) == 0:
+                            if np.max(m[:, 1]) == 0:
+                                m[:, :2] = m[:, 2:3]
+                            else:
+                                m[:, 0] = m[:, 1]
+
+            frame_data["masks"] = masks
+            
+            if r.boxes is not None and r.boxes.id is not None:
+                frame_data["ids"] = r.boxes.id.int().cpu().numpy()
+            else:
+                # If no tracking IDs (e.g. first frame or lost track), use -1 or generate new ones?
+                # If tracking is on, it should return IDs. If not, maybe just detection.
+                # But we requested track().
+                # If no ID, maybe it's a new object that wasn't tracked?
+                # Let's use -1 for untracked
+                if r.boxes is not None:
+                    frame_data["ids"] = np.full(len(r.boxes), -1, dtype=int)
+            
+            if r.boxes is not None:
+                frame_data["classes"] = r.boxes.cls.int().cpu().numpy()
+                
+        segmentation_data.append(frame_data)
+        
+        if i % 10 == 0:
+            print(f"Segmented {i+1}/{len(image_paths)} images")
+
+    display_VRAM_usage("after YOLO inference", include_peak=True)
+    
+    # Get class names
+    class_names = seg_model.names
+
+    # Cleanup
+    del seg_model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        display_VRAM_usage("after unloading YOLO")
+        
+    return segmentation_data, class_names
 
 class DownloadModelOperator(bpy.types.Operator):
     bl_idname = "da3.download_model"
     bl_label = "Download DA3 Model"
+
+    # NEW: optional override for which model to download
+    da3_override_model_name: bpy.props.StringProperty(
+        name="Override Model Name",
+        description="If set, download this model instead of the one selected in the scene",
+        default="",
+    )
 
     thread = None
     progress = 0
@@ -49,7 +289,7 @@ class DownloadModelOperator(bpy.types.Operator):
     stop_event = None
 
     def invoke(self, context, event):
-        model_name = context.scene.da3_model_name
+        model_name = self.da3_override_model_name or context.scene.da3_model_name
         self.model_path = get_model_path(model_name)
         
         if os.path.exists(self.model_path):
@@ -125,7 +365,7 @@ class DownloadModelOperator(bpy.types.Operator):
 
     def modal(self, context, event):
         if event.type == 'TIMER':
-            if self.stop_event.is_set() and self.thread.is_alive() is False:
+            if self.stop_event.is_set() and not self.thread.is_alive():
                 wm = context.window_manager
                 wm.event_timer_remove(self.timer)
                 wm.progress_end()
@@ -168,9 +408,26 @@ class DownloadModelOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        model_name = context.scene.da3_model_name
-        model_path = get_model_path(model_name)
-        return not os.path.exists(model_path)
+        # Allow the button to be clicked; existence is checked in execute()
+        return True
+        # model_name = context.scene.da3_model_name
+        # model_path = get_model_path(model_name)
+        # return not os.path.exists(model_path)
+
+
+class UnloadModelOperator(bpy.types.Operator):
+    bl_idname = "da3.unload_model"
+    bl_label = "Unload Model"
+
+    def execute(self, context):
+        unload_current_model()
+        self.report({'INFO'}, "Model unloaded and VRAM freed.")
+        return {'FINISHED'}
+
+    @classmethod
+    def poll(cls, context):
+        # Enable if a model is loaded
+        return model is not None
 
 
 class GeneratePointCloudOperator(bpy.types.Operator):
@@ -181,10 +438,32 @@ class GeneratePointCloudOperator(bpy.types.Operator):
     progress = 0
     error_message = ""
     stop_event = None
+    result_queue = None
 
     def invoke(self, context, event):
         self.input_folder = context.scene.da3_input_folder
-        self.model_name = context.scene.da3_model_name
+        self.base_model_name = context.scene.da3_model_name
+        self.use_metric = context.scene.da3_use_metric
+        self.metric_mode = getattr(context.scene, "da3_metric_mode", "scale_base")
+        self.use_ray_pose = getattr(context.scene, "da3_use_ray_pose", False)
+        self.process_res = context.scene.da3_process_res
+        self.process_res_method = context.scene.da3_process_res_method
+        self.use_half_precision = context.scene.da3_use_half_precision
+        self.filter_edges = getattr(context.scene, "da3_filter_edges", True)
+        self.min_confidence = getattr(context.scene, "da3_min_confidence", 0.5)
+        self.output_debug_images = getattr(context.scene, "da3_output_debug_images", False)
+        self.generate_mesh = getattr(context.scene, "da3_generate_mesh", False)
+        self.batch_mode = getattr(context.scene, "da3_batch_mode", "skip_frames")
+        self.batch_size = getattr(context.scene, "da3_batch_size", 10)
+        self.use_segmentation = getattr(context.scene, "da3_use_segmentation", False)
+        self.segmentation_conf = getattr(context.scene, "da3_segmentation_conf", 0.25)
+        self.segmentation_model = getattr(context.scene, "da3_segmentation_model", "yolo11x-seg")
+        self.detect_motion = getattr(context.scene, "da3_detect_motion", False)
+        self.motion_threshold = getattr(context.scene, "da3_motion_threshold", 0.1)
+        
+        if self.process_res % 14 != 0:
+            self.report({'ERROR'}, "Process resolution must be a multiple of 14.")
+            return {'CANCELLED'}
         
         if not self.input_folder or not os.path.isdir(self.input_folder):
             self.report({'ERROR'}, "Please select a valid input folder.")
@@ -193,6 +472,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.progress = 0
         self.error_message = ""
         self.stop_event = threading.Event()
+        self.result_queue = queue.Queue()
 
         self.thread = threading.Thread(target=self.generate_worker)
         self.thread.start()
@@ -206,7 +486,53 @@ class GeneratePointCloudOperator(bpy.types.Operator):
 
     def generate_worker(self):
         try:
-            model = get_model(self.model_name)
+            # Get image paths
+            import glob
+            self.image_paths = sorted(glob.glob(os.path.join(self.input_folder, "*.[jJpP][pPnN][gG]")))
+            if not self.image_paths:
+                self.result_queue.put({"type": "ERROR", "message": "No images found in the input folder."})
+                return
+            
+            print(f"Total images: {len(self.image_paths)}")
+            
+            if self.batch_mode == "skip_frames" and len(self.image_paths) > self.batch_size:
+                import numpy as np
+                indices = np.linspace(0, len(self.image_paths) - 1, self.batch_size, dtype=int)
+                self.image_paths = [self.image_paths[i] for i in indices]
+            
+            print(f"Processing {len(self.image_paths)} images...")
+
+            # Initialize progress bar
+            # LoadModelTime = 9.2 # seconds
+            # AlignBatchesTime = 0.29
+            # AddImagePointsTime = 0.27
+            # BatchTimePerImage = 4.9 # it's actually quadratic but close enough
+            # MetricLoadModelTime = 19.25
+            # MetricBatchTimePerImage = 0.62
+            # MetricCombineTime = 0.12
+            # if current_model_name == base_model_name:
+            #     LoadModelTime = 0
+            # needs_alignment = self.batch_mode in ("last_frame_overlap", "first_last_overlap")
+            # BaseTimeEstimate = LoadModelTime + BatchTimePerImage * len(self.image_paths)
+            # if needs_alignment:
+            #     BaseTimeEstimate += AlignBatchesTime
+            # if use_metric:
+            #     MetricTimeEstimate = BaseTimeEstimate + MetricLoadModelTime
+            #     if metric_mode == "scale_base":
+            #         MetricTimeEstimate += MetricBatchTimePerImage * self.batch_size
+            #     else:
+            #         MetricTimeEstimate += MetricBatchTimePerImage * len(self.image_paths)
+            #     AfterCombineTimeEstimate = MetricTimeEstimate
+            #     if needs_alignment:
+            #         AfterCombineTimeEstimate += AlignBatchesTime
+            #     AfterCombineTimeEstimate += MetricCombineTime
+            # else:
+            #     MetricTimeEstimate = BaseTimeEstimate
+            #     AfterCombineTimeEstimate = BaseTimeEstimate
+            #     if needs_alignment:
+            #         AfterCombineTimeEstimate += AlignBatchesTime
+            # TotalTimeEstimate = AfterCombineTimeEstimate + AddImagePointsTime*len(self.image_paths)
+            # start_progress_timer(TotalTimeEstimate)
 
             def progress_callback(progress_value):
                 if self.stop_event.is_set():
@@ -214,41 +540,303 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 self.progress = progress_value
                 return False
 
-            self.predictions = run_model(self.input_folder, model, progress_callback)
+            # 0) Run Segmentation
+            all_segmentation_data = None
+            segmentation_class_names = None
+            if self.use_segmentation:
+                print("Running segmentation...")
+                # Ensure DA3 model is unloaded
+                unload_current_model()
+                all_segmentation_data, segmentation_class_names = run_segmentation(
+                    self.image_paths, 
+                    conf_threshold=self.segmentation_conf, 
+                    model_name=self.segmentation_model
+                )
+                if all_segmentation_data is None:
+                    print("Segmentation failed or cancelled. Proceeding without segmentation.")
+
+            # 1) run base model
+            print(f"Loading {self.base_model_name} model...")
+            base_model = get_model(self.base_model_name)
+            # update_progress_timer(LoadModelTime, "Loaded base model")
+            print("Running base model inference...")
+            
+            all_base_predictions = []
+            
+            if self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+                if self.batch_mode == "last_frame_overlap":
+                    step = self.batch_size - 1
+                    num_batches = (len(self.image_paths) + step - 1) // step  # Ceiling division
+                    for batch_idx, start_idx in enumerate(range(0, len(self.image_paths), step)):
+                        end_idx = min(start_idx + self.batch_size, len(self.image_paths))
+                        batch_paths = self.image_paths[start_idx:end_idx]
+                        batch_indices = list(range(start_idx, end_idx))
+                        print(f"Batch {batch_idx + 1}/{num_batches}:")
+                        prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                        # update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
+                        all_base_predictions.append((prediction, batch_indices))
+                else:
+                    # New scheme: (0..9) (0, 9, 10..17) (10, 17, 18..25)
+                    N = len(self.image_paths)
+                    if self.batch_size < 3:
+                        step = 1
+                    else:
+                        step = self.batch_size - 2
+
+                    # First batch
+                    start = 0
+                    end = min(self.batch_size, N)
+                    batch_indices = list(range(start, end))
+                    current_new_indices = batch_indices
+                    
+                    remaining_start = end
+                    
+                    if step > 0:
+                        num_batches = 1 + max(0, (N - end + step - 1) // step)
+                    else:
+                        num_batches = (N + self.batch_size - 1) // self.batch_size
+
+                    batch_idx = 0
+                    while True:
+                        batch_paths = [self.image_paths[i] for i in batch_indices]
+                        print(f"Batch {batch_idx + 1}/{num_batches}:")
+                        prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                        end_idx = batch_indices[-1] + 1
+                        # update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
+                        all_base_predictions.append((prediction, batch_indices.copy()))
+
+                        if remaining_start >= N:
+                            break
+
+                        # Determine overlap frames from the "new" frames of the current batch
+                        overlap_indices = [current_new_indices[0], current_new_indices[-1]]
+                        # Remove duplicates if any (e.g. if only 1 new frame)
+                        if overlap_indices[0] == overlap_indices[1]:
+                            overlap_indices = [overlap_indices[0]]
+
+                        next_end = min(remaining_start + step, N)
+                        next_new_indices = list(range(remaining_start, next_end))
+                        
+                        batch_indices = overlap_indices + next_new_indices
+                        current_new_indices = next_new_indices
+                        
+                        remaining_start = next_end
+                        batch_idx += 1
+            else:
+                prediction = run_model(self.image_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                # update_progress_timer(LoadModelTime + len(self.image_paths) * BatchTimePerImage, "Base batch complete")
+                all_base_predictions.append((prediction, list(range(len(self.image_paths)))))
+            
+            # update_progress_timer(BaseTimeEstimate, "Base inference complete")
+
+            # 2) if metric enabled and weights available:
+            all_metric_predictions = []
+            metric_available = False
+            
+            if self.use_metric:
+                metric_path = get_model_path("da3metric-large")
+                if os.path.exists(metric_path):
+                    metric_available = True
+                    # free base model from VRAM before loading metric
+                    print("Unloading base model and loading metric model...")
+                    base_model = None
+                    unload_current_model()
+
+                    metric_model = get_model("da3metric-large")
+                    # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime, "Loaded metric model")
+                    print("Running metric model inference...")
+                    
+                    if self.metric_mode == "scale_base":
+                        # In scale_base mode, run **one** metric batch over all images.
+                        N = len(self.image_paths)
+                        start = 0
+                        end = min(self.batch_size, N)
+                        batch_indices = list(range(start, end))
+                        batch_paths = [self.image_paths[i] for i in batch_indices]
+                        prediction = run_model(
+                            batch_paths,
+                            metric_model,
+                            self.process_res,
+                            self.process_res_method,
+                            use_half=self.use_half_precision,
+                            use_ray_pose=self.use_ray_pose,
+                            progress_callback=progress_callback
+                        )
+                        # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end * MetricBatchTimePerImage, "Metric batch complete")
+                        all_metric_predictions.append((prediction, batch_indices.copy()))
+                    else:
+                        # For other metric modes, keep previous batching behaviour
+                        if self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+                            # Process in overlapping batches for metric too (mirror base logic)
+                            if self.batch_mode == "last_frame_overlap":
+                                step = self.batch_size - 1
+                                num_batches = (len(self.image_paths) + step - 1) // step
+                                for batch_idx, start_idx in enumerate(range(0, len(self.image_paths), step)):
+                                    end_idx = min(start_idx + self.batch_size, len(self.image_paths))
+                                    batch_paths = self.image_paths[start_idx:end_idx]
+                                    batch_indices = list(range(start_idx, end_idx))
+                                    print(f"Batch {batch_idx + 1}/{num_batches}:")
+                                    prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                                    # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end_idx * MetricBatchTimePerImage, f"Metric batch {batch_idx + 1}")
+                                    all_metric_predictions.append((prediction, batch_indices))
+                            else:
+                                N = len(self.image_paths)
+                                if self.batch_size < 3:
+                                    step = 1
+                                else:
+                                    step = self.batch_size - 2
+
+                                start = 0
+                                end = min(self.batch_size, N)
+                                batch_indices = list(range(start, end))
+                                current_new_indices = batch_indices
+                                
+                                remaining_start = end
+                                
+                                if step > 0:
+                                    num_batches = 1 + max(0, (N - end + step - 1) // step)
+                                else:
+                                    num_batches = (N + self.batch_size - 1) // self.batch_size
+
+                                batch_idx = 0
+                                while True:
+                                    batch_paths = [self.image_paths[i] for i in batch_indices]
+                                    print(f"Batch {batch_idx + 1}/{num_batches}:")
+                                    prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                                    end_idx = batch_indices[-1] + 1
+                                    # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end_idx * MetricBatchTimePerImage, f"Metric batch {batch_idx + 1}")
+                                    all_metric_predictions.append((prediction, batch_indices.copy()))
+
+                                    if remaining_start >= N:
+                                        break
+
+                                    overlap_indices = [current_new_indices[0], current_new_indices[-1]]
+                                    if overlap_indices[0] == overlap_indices[1]:
+                                        overlap_indices = [overlap_indices[0]]
+
+                                    next_end = min(remaining_start + step, N)
+                                    next_new_indices = list(range(remaining_start, next_end))
+                                    
+                                    batch_indices = overlap_indices + next_new_indices
+                                    current_new_indices = next_new_indices
+                                    
+                                    remaining_start = next_end
+                                    batch_idx += 1
+                        else:
+                            prediction = run_model(self.image_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                            all_metric_predictions.append((prediction, list(range(len(self.image_paths)))))
+                            # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + len(self.image_paths) * MetricBatchTimePerImage, "Metric batch complete")
+                    metric_model = None
+                    unload_current_model()
+                else:
+                    print("Metric model not downloaded; using non-metric depth only.")
+            
+            
+            # update_progress_timer(MetricTimeEstimate, "Metric inference complete")
+            # Align base batches. Metric is **not** aligned in scale_base mode.
+            if self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+                aligned_base_predictions = align_batches(all_base_predictions)
+                if metric_available:
+                    aligned_metric_predictions = [p[0] for p in all_metric_predictions]
+            else:
+                aligned_base_predictions = [p[0] for p in all_base_predictions]
+                if metric_available:
+                    aligned_metric_predictions = [p[0] for p in all_metric_predictions]
+            # update_progress_timer(MetricTimeEstimate + AlignBatchesTime, "Align batches complete")
+
+            # Creating the main collection named after the folder has been moved
+            # Combine the base and metric predictions
+            if metric_available:
+                all_combined_predictions = combine_base_and_metric(aligned_base_predictions, aligned_metric_predictions)
+            else:
+                all_combined_predictions = aligned_base_predictions
+            # update_progress_timer(AfterCombineTimeEstimate, "Combined predictions complete")
+
+            # Detect motion
+            if self.detect_motion:
+                print("Detecting motion...")
+                compute_motion_scores(all_combined_predictions, threshold_ratio=self.motion_threshold)
+                # update_progress_timer(AfterCombineTimeEstimate + 1.0, "Motion detection complete")
+
+            # Prepare for import
+            folder_name = os.path.basename(os.path.normpath(self.input_folder))
+            self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
+
+            for batch_number, batch_prediction in enumerate(all_combined_predictions):
+                batch_indices = all_base_predictions[batch_number][1]
+                batch_paths = [self.image_paths[j] for j in batch_indices]
+                
+                # Extract segmentation data for this batch
+                batch_segmentation = None
+                if all_segmentation_data:
+                    batch_segmentation = [all_segmentation_data[j] for j in batch_indices]
+
+                combined_predictions = convert_prediction_to_dict(
+                    batch_prediction, 
+                    batch_paths, 
+                    output_debug_images=self.output_debug_images,
+                    segmentation_data=batch_segmentation,
+                    class_names=segmentation_class_names
+                )
+                
+                # Create batch collection
+                self.result_queue.put({
+                    "type": "BATCH_READY",
+                    "data": combined_predictions,
+                    "batch_number": batch_number,
+                    "folder_name": folder_name,
+                    "batch_indices": batch_indices,
+                    "generate_mesh": self.generate_mesh,
+                    "filter_edges": self.filter_edges,
+                    "min_confidence": self.min_confidence
+                })
+            
+            self.result_queue.put({"type": "DONE"})
 
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.error_message = f"Failed to generate point cloud: {e}"
+            self.result_queue.put({"type": "ERROR", "message": f"Failed to generate point cloud: {e}"})
         finally:
             self.stop_event.set()
 
     def modal(self, context, event):
         if event.type == 'TIMER':
-            if self.stop_event.is_set() and self.thread.is_alive() is False:
-                wm = context.window_manager
-                wm.event_timer_remove(self.timer)
-                wm.progress_end()
-
-                if self.error_message:
-                    self.report({'ERROR'}, self.error_message)
+            while not self.result_queue.empty():
+                try:
+                    msg = self.result_queue.get_nowait()
+                except queue.Empty:
+                    break
+                
+                if msg["type"] == "ERROR":
+                    self.report({'ERROR'}, msg["message"])
+                    self.cleanup(context)
                     return {'CANCELLED'}
-
-                if self.predictions:
-                    import_point_cloud(self.predictions)
-                    create_cameras(self.predictions)
-                    self.report({'INFO'}, "Point cloud generated and imported successfully.")
-                    self.report({'INFO'}, "Cameras generated successfully.")
+                
+                elif msg["type"] == "INIT_COLLECTION":
+                    folder_name = msg["folder_name"]
+                    if folder_name not in bpy.data.collections:
+                        parent_col = bpy.data.collections.new(folder_name)
+                        context.scene.collection.children.link(parent_col)
+                
+                elif msg["type"] == "BATCH_READY":
+                    self.process_batch(context, msg)
+                
+                elif msg["type"] == "DONE":
+                    self.report({'INFO'}, "Point cloud generation complete.")
+                    self.cleanup(context)
+                    return {'FINISHED'}
+            
+            if self.stop_event.is_set() and not self.thread.is_alive() and self.result_queue.empty():
+                self.cleanup(context)
                 return {'FINISHED'}
-
+                
             context.window_manager.progress_update(self.progress)
 
         elif event.type in {'RIGHTMOUSE', 'ESC'}:
             self.stop_event.set()
 
-            wm = context.window_manager
-            wm.event_timer_remove(self.timer)
-            wm.progress_end()
+            self.cleanup(context)
 
             self.report({'WARNING'}, "Generation cancelled.")
 
@@ -258,6 +846,58 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             return {'CANCELLED'}
 
         return {'PASS_THROUGH'}
+
+    def cleanup(self, context):
+        wm = context.window_manager
+        wm.event_timer_remove(self.timer)
+        wm.progress_end()
+
+    def process_batch(self, context, msg):
+        try:
+            folder_name = msg["folder_name"]
+            batch_number = msg["batch_number"]
+            combined_predictions = msg["data"]
+            batch_indices = msg["batch_indices"]
+            generate_mesh = msg["generate_mesh"]
+            filter_edges = msg["filter_edges"]
+            min_confidence = msg["min_confidence"]
+            
+            parent_col = bpy.data.collections.get(folder_name)
+            if not parent_col:
+                parent_col = bpy.data.collections.new(folder_name)
+                context.scene.collection.children.link(parent_col)
+                
+            batch_col_name = f"{folder_name}_Batch_{batch_number+1}"
+            batch_col = bpy.data.collections.new(batch_col_name)
+            parent_col.children.link(batch_col)
+            
+            if generate_mesh:
+                import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
+            else:
+                import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
+            
+            create_cameras(combined_predictions, collection=batch_col)
+        except Exception as e:
+            # end_progress_timer()
+            import traceback
+            print("DA3 ERROR while adding point clouds to Blender:")
+            traceback.print_exc()
+            base_model = None
+            metric_model = None
+            base_prediction = None
+            metric_prediction = None
+            combined_prediction = None
+            combined_predictions = None
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()  # Force free any pending allocations
+                except Exception as e:
+                    print(f"Warning: Failed to empty CUDA cache: {e}")
+            import gc
+            gc.collect()  # Force garbage collection
+            unload_current_model()  # Free VRAM on error
+            self.report({'ERROR'}, f"Failed to generate point cloud: {e}")
+            return {'CANCELLED'}
 
     @classmethod
     def poll(cls, context):
