@@ -206,7 +206,10 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# DA3 Addon
-deps_da3/
-deps_public/
-da3_repo/
+# Our Blender add-on generated files
+/da3_repo
+/deps_public
+/deps_da3
+/models/*.safetensors
+debug_output/
+/models/*.pt
