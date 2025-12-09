@@ -16,6 +16,9 @@ from .utils import (
     align_batches,
     compute_motion_scores,
 )
+import urllib.request
+import threading
+import queue
 
 wm = None
 total_predicted_time = None
@@ -280,27 +283,128 @@ class DownloadModelOperator(bpy.types.Operator):
         default="",
     )
 
-    def execute(self, context):
+    thread = None
+    progress = 0
+    error_message = ""
+    stop_event = None
+
+    def invoke(self, context, event):
         model_name = self.da3_override_model_name or context.scene.da3_model_name
-        model_path = get_model_path(model_name)
+        self.model_path = get_model_path(model_name)
         
-        if os.path.exists(model_path):
+        if os.path.exists(self.model_path):
             self.report({'INFO'}, f"Model {model_name} already downloaded.")
             return {'FINISHED'}
         
         if model_name not in _URLS:
             self.report({'ERROR'}, f"Unknown model: {model_name}")
             return {'CANCELLED'}
-            
+
+        self.progress = 0
+        self.error_message = ""
+        self.stop_event = threading.Event()
+
+        self.thread = threading.Thread(target=self.download_file, args=(_URLS[model_name], self.model_path))
+        self.thread.start()
+
+        wm = context.window_manager
+        wm.progress_begin(0, 100)
+        self.timer = wm.event_timer_add(0.1, window=context.window)
+        wm.modal_handler_add(self)
+
+        return {'RUNNING_MODAL'}
+
+    def download_file(self, url, path):
+        """
+        Downloads a model file from the specified URL to the given path.
+
+        This method is intended to be run in a separate thread, as it performs
+        a potentially long-running network operation. It communicates progress
+        and error status to the main thread via the following instance attributes:
+
+        - self.progress: Updated with the current download percentage (0-100).
+        - self.error_message: Set if an error occurs during download.
+        - self.stop_event: A threading.Event used to signal cancellation and to
+          indicate completion.
+
+        Thread safety: Only the above attributes are shared with the main thread.
+        No Blender UI operations are performed in this thread. The main thread
+        should poll these attributes to update the UI or handle errors.
+
+        Args:
+            url (str): The URL to download the model from.
+            path (str): The local filesystem path to save the downloaded file.
+        """
         try:
-            print(f"Downloading model {model_name}...")
+            print(f"Downloading model {url.split('/')[-2]}...")
             os.makedirs(MODELS_DIR, exist_ok=True)
-            torch.hub.download_url_to_file(_URLS[model_name], model_path)
-            self.report({'INFO'}, f"Model {model_name} downloaded successfully.")
+
+            with urllib.request.urlopen(url) as response:
+                total_size = int(response.info().get('Content-Length', -1))
+                chunk_size = 1024 * 4
+                bytes_so_far = 0
+
+                with open(path, 'wb') as f:
+                    while not self.stop_event.is_set():
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        bytes_so_far += len(chunk)
+
+                        if total_size > 0:
+                            self.progress = (bytes_so_far / total_size) * 100
+
+            if not self.stop_event.is_set():
+                self.progress = 100
+
         except Exception as e:
-            self.report({'ERROR'}, f"Failed to download model {model_name}: {e}")
+            self.error_message = f"Failed to download model: {e}"
+        finally:
+            self.stop_event.set()
+
+    def modal(self, context, event):
+        if event.type == 'TIMER':
+            if self.stop_event.is_set() and not self.thread.is_alive():
+                wm = context.window_manager
+                wm.event_timer_remove(self.timer)
+                wm.progress_end()
+
+                if self.error_message:
+                    self.report({'ERROR'}, self.error_message)
+                    if os.path.exists(self.model_path):
+                        os.remove(self.model_path)
+                    return {'CANCELLED'}
+
+                model_name = context.scene.da3_model_name
+                self.report({'INFO'}, f"Model {model_name} downloaded successfully.")
+
+                for area in bpy.context.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
+
+                return {'FINISHED'}
+
+            context.window_manager.progress_update(self.progress)
+
+        elif event.type in {'RIGHTMOUSE', 'ESC'}:
+            self.stop_event.set()
+
+            wm = context.window_manager
+            wm.event_timer_remove(self.timer)
+            wm.progress_end()
+
+            self.report({'WARNING'}, "Download cancelled.")
+
+            # Wait for the thread to finish before deleting the file
+            if self.thread.is_alive():
+                self.thread.join()
+
+            if os.path.exists(self.model_path):
+                os.remove(self.model_path)
             return {'CANCELLED'}
-        return {'FINISHED'}
+
+        return {'PASS_THROUGH'}
 
     @classmethod
     def poll(cls, context):
@@ -330,132 +434,158 @@ class GeneratePointCloudOperator(bpy.types.Operator):
     bl_idname = "da3.generate_point_cloud"
     bl_label = "Generate Point Cloud"
 
-    def execute(self, context):
-        input_folder = context.scene.da3_input_folder
-        base_model_name = context.scene.da3_model_name
-        use_metric = context.scene.da3_use_metric
-        metric_mode = getattr(context.scene, "da3_metric_mode", "scale_base")
-        use_ray_pose = getattr(context.scene, "da3_use_ray_pose", False)
-        process_res = context.scene.da3_process_res
-        process_res_method = context.scene.da3_process_res_method
-        use_half_precision = context.scene.da3_use_half_precision
-        filter_edges = getattr(context.scene, "da3_filter_edges", True)
-        min_confidence = getattr(context.scene, "da3_min_confidence", 0.5)
-        output_debug_images = getattr(context.scene, "da3_output_debug_images", False)
-        generate_mesh = getattr(context.scene, "da3_generate_mesh", False)
+    thread = None
+    progress = 0
+    error_message = ""
+    stop_event = None
+    result_queue = None
+
+    def invoke(self, context, event):
+        self.input_folder = context.scene.da3_input_folder
+        self.base_model_name = context.scene.da3_model_name
+        self.use_metric = context.scene.da3_use_metric
+        self.metric_mode = getattr(context.scene, "da3_metric_mode", "scale_base")
+        self.use_ray_pose = getattr(context.scene, "da3_use_ray_pose", False)
+        self.process_res = context.scene.da3_process_res
+        self.process_res_method = context.scene.da3_process_res_method
+        self.use_half_precision = context.scene.da3_use_half_precision
+        self.filter_edges = getattr(context.scene, "da3_filter_edges", True)
+        self.min_confidence = getattr(context.scene, "da3_min_confidence", 0.5)
+        self.output_debug_images = getattr(context.scene, "da3_output_debug_images", False)
+        self.generate_mesh = getattr(context.scene, "da3_generate_mesh", False)
+        self.batch_mode = getattr(context.scene, "da3_batch_mode", "skip_frames")
+        self.batch_size = getattr(context.scene, "da3_batch_size", 10)
+        self.use_segmentation = getattr(context.scene, "da3_use_segmentation", False)
+        self.segmentation_conf = getattr(context.scene, "da3_segmentation_conf", 0.25)
+        self.segmentation_model = getattr(context.scene, "da3_segmentation_model", "yolo11x-seg")
+        self.detect_motion = getattr(context.scene, "da3_detect_motion", False)
+        self.motion_threshold = getattr(context.scene, "da3_motion_threshold", 0.1)
         
-        if process_res % 14 != 0:
+        if self.process_res % 14 != 0:
             self.report({'ERROR'}, "Process resolution must be a multiple of 14.")
             return {'CANCELLED'}
         
-        if not input_folder or not os.path.isdir(input_folder):
+        if not self.input_folder or not os.path.isdir(self.input_folder):
             self.report({'ERROR'}, "Please select a valid input folder.")
             return {'CANCELLED'}
-        
-        # Get image paths
-        import glob
-        image_paths = sorted(glob.glob(os.path.join(input_folder, "*.[jJpP][pPnN][gG]")))
-        if not image_paths:
-            self.report({'ERROR'}, "No images found in the input folder.")
-            return {'CANCELLED'}
-        
-        print(f"Total images: {len(image_paths)}")
-        
-        batch_mode = context.scene.da3_batch_mode
-        batch_size = context.scene.da3_batch_size
-        if batch_mode == "skip_frames" and len(image_paths) > batch_size:
-            import numpy as np
-            indices = np.linspace(0, len(image_paths) - 1, batch_size, dtype=int)
-            image_paths = [image_paths[i] for i in indices]
-        # For overlap modes and ignore_batch_size, use all images
-        
-        self.report({'INFO'}, f"Processing {len(image_paths)} images...")
 
-        # Initialize progress bar
-        LoadModelTime = 9.2 # seconds
-        AlignBatchesTime = 0.29
-        AddImagePointsTime = 0.27
-        BatchTimePerImage = 4.9 # it's actually quadratic but close enough
-        MetricLoadModelTime = 19.25
-        MetricBatchTimePerImage = 0.62
-        MetricCombineTime = 0.12
-        if current_model_name == base_model_name:
-            LoadModelTime = 0
-        needs_alignment = batch_mode in ("last_frame_overlap", "first_last_overlap")
-        BaseTimeEstimate = LoadModelTime + BatchTimePerImage * len(image_paths)
-        if needs_alignment:
-            BaseTimeEstimate += AlignBatchesTime
-        if use_metric:
-            MetricTimeEstimate = BaseTimeEstimate + MetricLoadModelTime
-            if metric_mode == "scale_base":
-                MetricTimeEstimate += MetricBatchTimePerImage * batch_size
-            else:
-                MetricTimeEstimate += MetricBatchTimePerImage * len(image_paths)
-            AfterCombineTimeEstimate = MetricTimeEstimate
-            if needs_alignment:
-                AfterCombineTimeEstimate += AlignBatchesTime
-            AfterCombineTimeEstimate += MetricCombineTime
-        else:
-            MetricTimeEstimate = BaseTimeEstimate
-            AfterCombineTimeEstimate = BaseTimeEstimate
-            if needs_alignment:
-                AfterCombineTimeEstimate += AlignBatchesTime
-        TotalTimeEstimate = AfterCombineTimeEstimate + AddImagePointsTime*len(image_paths)
-        start_progress_timer(TotalTimeEstimate)
-        self.report({'INFO'}, "Starting point cloud generation...")
+        self.progress = 0
+        self.error_message = ""
+        self.stop_event = threading.Event()
+        self.result_queue = queue.Queue()
 
+        self.thread = threading.Thread(target=self.generate_worker)
+        self.thread.start()
+
+        wm = context.window_manager
+        wm.progress_begin(0, 100)
+        self.timer = wm.event_timer_add(0.1, window=context.window)
+        wm.modal_handler_add(self)
+
+        return {'RUNNING_MODAL'}
+
+    def generate_worker(self):
         try:
-            # 0) Run Segmentation if enabled
+            # Get image paths
+            import glob
+            self.image_paths = sorted(glob.glob(os.path.join(self.input_folder, "*.[jJpP][pPnN][gG]")))
+            if not self.image_paths:
+                self.result_queue.put({"type": "ERROR", "message": "No images found in the input folder."})
+                return
+            
+            print(f"Total images: {len(self.image_paths)}")
+            
+            if self.batch_mode == "skip_frames" and len(self.image_paths) > self.batch_size:
+                import numpy as np
+                indices = np.linspace(0, len(self.image_paths) - 1, self.batch_size, dtype=int)
+                self.image_paths = [self.image_paths[i] for i in indices]
+            
+            print(f"Processing {len(self.image_paths)} images...")
+
+            # Initialize progress bar
+            # LoadModelTime = 9.2 # seconds
+            # AlignBatchesTime = 0.29
+            # AddImagePointsTime = 0.27
+            # BatchTimePerImage = 4.9 # it's actually quadratic but close enough
+            # MetricLoadModelTime = 19.25
+            # MetricBatchTimePerImage = 0.62
+            # MetricCombineTime = 0.12
+            # if current_model_name == base_model_name:
+            #     LoadModelTime = 0
+            # needs_alignment = self.batch_mode in ("last_frame_overlap", "first_last_overlap")
+            # BaseTimeEstimate = LoadModelTime + BatchTimePerImage * len(self.image_paths)
+            # if needs_alignment:
+            #     BaseTimeEstimate += AlignBatchesTime
+            # if use_metric:
+            #     MetricTimeEstimate = BaseTimeEstimate + MetricLoadModelTime
+            #     if metric_mode == "scale_base":
+            #         MetricTimeEstimate += MetricBatchTimePerImage * self.batch_size
+            #     else:
+            #         MetricTimeEstimate += MetricBatchTimePerImage * len(self.image_paths)
+            #     AfterCombineTimeEstimate = MetricTimeEstimate
+            #     if needs_alignment:
+            #         AfterCombineTimeEstimate += AlignBatchesTime
+            #     AfterCombineTimeEstimate += MetricCombineTime
+            # else:
+            #     MetricTimeEstimate = BaseTimeEstimate
+            #     AfterCombineTimeEstimate = BaseTimeEstimate
+            #     if needs_alignment:
+            #         AfterCombineTimeEstimate += AlignBatchesTime
+            # TotalTimeEstimate = AfterCombineTimeEstimate + AddImagePointsTime*len(self.image_paths)
+            # start_progress_timer(TotalTimeEstimate)
+
+            def progress_callback(progress_value):
+                if self.stop_event.is_set():
+                    return True
+                self.progress = progress_value
+                return False
+
+            # 0) Run Segmentation
             all_segmentation_data = None
             segmentation_class_names = None
-            if getattr(context.scene, "da3_use_segmentation", False):
-                self.report({'INFO'}, "Running segmentation...")
+            if self.use_segmentation:
+                print("Running segmentation...")
                 # Ensure DA3 model is unloaded
                 unload_current_model()
-                
-                seg_conf = getattr(context.scene, "da3_segmentation_conf", 0.25)
-                seg_model_name = getattr(context.scene, "da3_segmentation_model", "yolo11x-seg")
-                all_segmentation_data, segmentation_class_names = run_segmentation(image_paths, conf_threshold=seg_conf, model_name=seg_model_name)
-                
+                all_segmentation_data, segmentation_class_names = run_segmentation(
+                    self.image_paths, 
+                    conf_threshold=self.segmentation_conf, 
+                    model_name=self.segmentation_model
+                )
                 if all_segmentation_data is None:
-                    self.report({'WARNING'}, "Segmentation failed or cancelled. Proceeding without segmentation.")
-                else:
-                    self.report({'INFO'}, "Segmentation complete.")
-                    update_progress_timer(0, "Segmentation complete") # Timer doesn't account for seg yet
+                    print("Segmentation failed or cancelled. Proceeding without segmentation.")
 
             # 1) run base model
-            self.report({'INFO'}, f"Loading {base_model_name} model...")
-            base_model = get_model(base_model_name)
-            update_progress_timer(LoadModelTime, "Loaded base model")
-            self.report({'INFO'}, "Running base model inference...")
+            print(f"Loading {self.base_model_name} model...")
+            base_model = get_model(self.base_model_name)
+            # update_progress_timer(LoadModelTime, "Loaded base model")
+            print("Running base model inference...")
             
             all_base_predictions = []
             
-            if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
-                # Process in overlapping batches
-                if batch_mode == "last_frame_overlap":
-                    # Existing scheme: last frame of previous batch overlaps with first of next
-                    step = batch_size - 1
-                    num_batches = (len(image_paths) + step - 1) // step  # Ceiling division
-                    for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
-                        end_idx = min(start_idx + batch_size, len(image_paths))
-                        batch_paths = image_paths[start_idx:end_idx]
+            if self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+                if self.batch_mode == "last_frame_overlap":
+                    step = self.batch_size - 1
+                    num_batches = (len(self.image_paths) + step - 1) // step  # Ceiling division
+                    for batch_idx, start_idx in enumerate(range(0, len(self.image_paths), step)):
+                        end_idx = min(start_idx + self.batch_size, len(self.image_paths))
+                        batch_paths = self.image_paths[start_idx:end_idx]
                         batch_indices = list(range(start_idx, end_idx))
                         print(f"Batch {batch_idx + 1}/{num_batches}:")
-                        prediction = run_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
-                        update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
+                        prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                        # update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
                         all_base_predictions.append((prediction, batch_indices))
                 else:
                     # New scheme: (0..9) (0, 9, 10..17) (10, 17, 18..25)
-                    N = len(image_paths)
-                    if batch_size < 3:
+                    N = len(self.image_paths)
+                    if self.batch_size < 3:
                         step = 1
                     else:
-                        step = batch_size - 2
+                        step = self.batch_size - 2
 
                     # First batch
                     start = 0
-                    end = min(batch_size, N)
+                    end = min(self.batch_size, N)
                     batch_indices = list(range(start, end))
                     current_new_indices = batch_indices
                     
@@ -464,15 +594,15 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                     if step > 0:
                         num_batches = 1 + max(0, (N - end + step - 1) // step)
                     else:
-                        num_batches = (N + batch_size - 1) // batch_size
+                        num_batches = (N + self.batch_size - 1) // self.batch_size
 
                     batch_idx = 0
                     while True:
-                        batch_paths = [image_paths[i] for i in batch_indices]
+                        batch_paths = [self.image_paths[i] for i in batch_indices]
                         print(f"Batch {batch_idx + 1}/{num_batches}:")
-                        prediction = run_model(batch_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
+                        prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
                         end_idx = batch_indices[-1] + 1
-                        update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
+                        # update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
                         all_base_predictions.append((prediction, batch_indices.copy()))
 
                         if remaining_start >= N:
@@ -493,70 +623,71 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         remaining_start = next_end
                         batch_idx += 1
             else:
-                prediction = run_model(image_paths, base_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
-                update_progress_timer(LoadModelTime + len(image_paths) * BatchTimePerImage, "Base batch complete")
-                all_base_predictions.append((prediction, list(range(len(image_paths)))))
+                prediction = run_model(self.image_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                # update_progress_timer(LoadModelTime + len(self.image_paths) * BatchTimePerImage, "Base batch complete")
+                all_base_predictions.append((prediction, list(range(len(self.image_paths)))))
             
-            update_progress_timer(BaseTimeEstimate, "Base inference complete")
+            # update_progress_timer(BaseTimeEstimate, "Base inference complete")
 
             # 2) if metric enabled and weights available:
             all_metric_predictions = []
             metric_available = False
             
-            if use_metric:
+            if self.use_metric:
                 metric_path = get_model_path("da3metric-large")
                 if os.path.exists(metric_path):
                     metric_available = True
                     # free base model from VRAM before loading metric
-                    self.report({'INFO'}, "Unloading base model and loading metric model...")
+                    print("Unloading base model and loading metric model...")
                     base_model = None
                     unload_current_model()
 
                     metric_model = get_model("da3metric-large")
-                    update_progress_timer(BaseTimeEstimate + MetricLoadModelTime, "Loaded metric model")
-                    self.report({'INFO'}, "Running metric model inference...")
+                    # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime, "Loaded metric model")
+                    print("Running metric model inference...")
                     
-                    if metric_mode == "scale_base":
+                    if self.metric_mode == "scale_base":
                         # In scale_base mode, run **one** metric batch over all images.
-                        N = len(image_paths)
+                        N = len(self.image_paths)
                         start = 0
-                        end = min(batch_size, N)
+                        end = min(self.batch_size, N)
                         batch_indices = list(range(start, end))
-                        batch_paths = [image_paths[i] for i in batch_indices]
+                        batch_paths = [self.image_paths[i] for i in batch_indices]
                         prediction = run_model(
                             batch_paths,
                             metric_model,
-                            process_res,
-                            process_res_method,
-                            use_half=use_half_precision,
-                            use_ray_pose=use_ray_pose,
+                            self.process_res,
+                            self.process_res_method,
+                            use_half=self.use_half_precision,
+                            use_ray_pose=self.use_ray_pose,
+                            progress_callback=progress_callback
                         )
-                        update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end * MetricBatchTimePerImage, "Metric batch complete")
+                        # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end * MetricBatchTimePerImage, "Metric batch complete")
                         all_metric_predictions.append((prediction, batch_indices.copy()))
                     else:
                         # For other metric modes, keep previous batching behaviour
-                        if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+                        if self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
                             # Process in overlapping batches for metric too (mirror base logic)
-                            if batch_mode == "last_frame_overlap":
-                                step = batch_size - 1
-                                num_batches = (len(image_paths) + step - 1) // step
-                                for batch_idx, start_idx in enumerate(range(0, len(image_paths), step)):
-                                    end_idx = min(start_idx + batch_size, len(image_paths))
-                                    batch_paths = image_paths[start_idx:end_idx]
+                            if self.batch_mode == "last_frame_overlap":
+                                step = self.batch_size - 1
+                                num_batches = (len(self.image_paths) + step - 1) // step
+                                for batch_idx, start_idx in enumerate(range(0, len(self.image_paths), step)):
+                                    end_idx = min(start_idx + self.batch_size, len(self.image_paths))
+                                    batch_paths = self.image_paths[start_idx:end_idx]
                                     batch_indices = list(range(start_idx, end_idx))
                                     print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                    prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
-                                    update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end_idx * MetricBatchTimePerImage, f"Metric batch {batch_idx + 1}")
+                                    prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                                    # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end_idx * MetricBatchTimePerImage, f"Metric batch {batch_idx + 1}")
                                     all_metric_predictions.append((prediction, batch_indices))
                             else:
-                                N = len(image_paths)
-                                if batch_size < 3:
+                                N = len(self.image_paths)
+                                if self.batch_size < 3:
                                     step = 1
                                 else:
-                                    step = batch_size - 2
+                                    step = self.batch_size - 2
 
                                 start = 0
-                                end = min(batch_size, N)
+                                end = min(self.batch_size, N)
                                 batch_indices = list(range(start, end))
                                 current_new_indices = batch_indices
                                 
@@ -565,15 +696,15 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                                 if step > 0:
                                     num_batches = 1 + max(0, (N - end + step - 1) // step)
                                 else:
-                                    num_batches = (N + batch_size - 1) // batch_size
+                                    num_batches = (N + self.batch_size - 1) // self.batch_size
 
                                 batch_idx = 0
                                 while True:
-                                    batch_paths = [image_paths[i] for i in batch_indices]
+                                    batch_paths = [self.image_paths[i] for i in batch_indices]
                                     print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                    prediction = run_model(batch_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
+                                    prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
                                     end_idx = batch_indices[-1] + 1
-                                    update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end_idx * MetricBatchTimePerImage, f"Metric batch {batch_idx + 1}")
+                                    # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end_idx * MetricBatchTimePerImage, f"Metric batch {batch_idx + 1}")
                                     all_metric_predictions.append((prediction, batch_indices.copy()))
 
                                     if remaining_start >= N:
@@ -592,57 +723,48 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                                     remaining_start = next_end
                                     batch_idx += 1
                         else:
-                            # Non-overlapping full batch
-                            prediction = run_model(image_paths, metric_model, process_res, process_res_method, use_half=use_half_precision, use_ray_pose=use_ray_pose)
-                            all_metric_predictions.append((prediction, list(range(len(image_paths)))))
-                            update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + len(image_paths) * MetricBatchTimePerImage, "Metric batch complete")
+                            prediction = run_model(self.image_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, progress_callback=progress_callback)
+                            all_metric_predictions.append((prediction, list(range(len(self.image_paths)))))
+                            # update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + len(self.image_paths) * MetricBatchTimePerImage, "Metric batch complete")
                     metric_model = None
                     unload_current_model()
                 else:
-                    self.report({'WARNING'}, "Metric model not downloaded; using non-metric depth only.")
+                    print("Metric model not downloaded; using non-metric depth only.")
             
             
-            update_progress_timer(MetricTimeEstimate, "Metric inference complete")
+            # update_progress_timer(MetricTimeEstimate, "Metric inference complete")
             # Align base batches. Metric is **not** aligned in scale_base mode.
-            if batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+            if self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
                 aligned_base_predictions = align_batches(all_base_predictions)
-                # Metric depth is absolute, and has no camera poses, so alignment between batches is less important (and not implemented yet).
                 if metric_available:
                     aligned_metric_predictions = [p[0] for p in all_metric_predictions]
             else:
                 aligned_base_predictions = [p[0] for p in all_base_predictions]
                 if metric_available:
                     aligned_metric_predictions = [p[0] for p in all_metric_predictions]
-            update_progress_timer(MetricTimeEstimate + AlignBatchesTime, "Align batches complete")
+            # update_progress_timer(MetricTimeEstimate + AlignBatchesTime, "Align batches complete")
 
-            # Create or get a collection named after the folder
-            folder_name = os.path.basename(os.path.normpath(input_folder))
-            scene = context.scene
-            collections = bpy.data.collections
-            
-            # Create parent collection
-            parent_col = collections.new(folder_name)
-            scene.collection.children.link(parent_col)
-
+            # Creating the main collection named after the folder has been moved
             # Combine the base and metric predictions
             if metric_available:
                 all_combined_predictions = combine_base_and_metric(aligned_base_predictions, aligned_metric_predictions)
             else:
                 all_combined_predictions = aligned_base_predictions
-            update_progress_timer(AfterCombineTimeEstimate, "Combined predictions complete")
+            # update_progress_timer(AfterCombineTimeEstimate, "Combined predictions complete")
 
             # Detect motion
-            detect_motion = getattr(context.scene, "da3_detect_motion", False)
-            if detect_motion:
-                motion_threshold = getattr(context.scene, "da3_motion_threshold", 0.1)
-                self.report({'INFO'}, "Detecting motion...")
-                compute_motion_scores(all_combined_predictions, threshold_ratio=motion_threshold)
+            if self.detect_motion:
+                print("Detecting motion...")
+                compute_motion_scores(all_combined_predictions, threshold_ratio=self.motion_threshold)
                 # update_progress_timer(AfterCombineTimeEstimate + 1.0, "Motion detection complete")
 
-            # Add a point cloud for each batch
+            # Prepare for import
+            folder_name = os.path.basename(os.path.normpath(self.input_folder))
+            self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
+
             for batch_number, batch_prediction in enumerate(all_combined_predictions):
                 batch_indices = all_base_predictions[batch_number][1]
-                batch_paths = [image_paths[j] for j in batch_indices]
+                batch_paths = [self.image_paths[j] for j in batch_indices]
                 
                 # Extract segmentation data for this batch
                 batch_segmentation = None
@@ -652,32 +774,113 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 combined_predictions = convert_prediction_to_dict(
                     batch_prediction, 
                     batch_paths, 
-                    output_debug_images=output_debug_images,
+                    output_debug_images=self.output_debug_images,
                     segmentation_data=batch_segmentation,
                     class_names=segmentation_class_names
                 )
                 
                 # Create batch collection
-                batch_col_name = f"{folder_name}_Batch_{batch_number+1}"
-                batch_col = collections.new(batch_col_name)
-                parent_col.children.link(batch_col)
-                
-                if generate_mesh:
-                    import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
-                else:
-                    import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
-                
-                create_cameras(combined_predictions, collection=batch_col)
-                end_idx = batch_indices[-1] + 1
-                update_progress_timer(AfterCombineTimeEstimate + AddImagePointsTime * end_idx, f"Added batch {batch_number + 1} to Blender")
+                self.result_queue.put({
+                    "type": "BATCH_READY",
+                    "data": combined_predictions,
+                    "batch_number": batch_number,
+                    "folder_name": folder_name,
+                    "batch_indices": batch_indices,
+                    "generate_mesh": self.generate_mesh,
+                    "filter_edges": self.filter_edges,
+                    "min_confidence": self.min_confidence
+                })
             
-            update_progress_timer(TotalTimeEstimate, "Point cloud generation complete")
-            end_progress_timer()
-            self.report({'INFO'}, "Point cloud generation complete.")
+            self.result_queue.put({"type": "DONE"})
+
         except Exception as e:
-            end_progress_timer()
             import traceback
-            print("DA3 ERROR while generating point cloud:")
+            traceback.print_exc()
+            self.result_queue.put({"type": "ERROR", "message": f"Failed to generate point cloud: {e}"})
+        finally:
+            self.stop_event.set()
+
+    def modal(self, context, event):
+        if event.type == 'TIMER':
+            while not self.result_queue.empty():
+                try:
+                    msg = self.result_queue.get_nowait()
+                except queue.Empty:
+                    break
+                
+                if msg["type"] == "ERROR":
+                    self.report({'ERROR'}, msg["message"])
+                    self.cleanup(context)
+                    return {'CANCELLED'}
+                
+                elif msg["type"] == "INIT_COLLECTION":
+                    folder_name = msg["folder_name"]
+                    if folder_name not in bpy.data.collections:
+                        parent_col = bpy.data.collections.new(folder_name)
+                        context.scene.collection.children.link(parent_col)
+                
+                elif msg["type"] == "BATCH_READY":
+                    self.process_batch(context, msg)
+                
+                elif msg["type"] == "DONE":
+                    self.report({'INFO'}, "Point cloud generation complete.")
+                    self.cleanup(context)
+                    return {'FINISHED'}
+            
+            if self.stop_event.is_set() and not self.thread.is_alive() and self.result_queue.empty():
+                self.cleanup(context)
+                return {'FINISHED'}
+                
+            context.window_manager.progress_update(self.progress)
+
+        elif event.type in {'RIGHTMOUSE', 'ESC'}:
+            self.stop_event.set()
+
+            self.cleanup(context)
+
+            self.report({'WARNING'}, "Generation cancelled.")
+
+            if self.thread.is_alive():
+                self.thread.join()
+
+            return {'CANCELLED'}
+
+        return {'PASS_THROUGH'}
+
+    def cleanup(self, context):
+        wm = context.window_manager
+        wm.event_timer_remove(self.timer)
+        wm.progress_end()
+
+    def process_batch(self, context, msg):
+        try:
+            folder_name = msg["folder_name"]
+            batch_number = msg["batch_number"]
+            combined_predictions = msg["data"]
+            batch_indices = msg["batch_indices"]
+            generate_mesh = msg["generate_mesh"]
+            filter_edges = msg["filter_edges"]
+            min_confidence = msg["min_confidence"]
+            
+            parent_col = bpy.data.collections.get(folder_name)
+            if not parent_col:
+                parent_col = bpy.data.collections.new(folder_name)
+                context.scene.collection.children.link(parent_col)
+                
+            batch_col_name = f"{folder_name}_Batch_{batch_number+1}"
+            batch_col = bpy.data.collections.new(batch_col_name)
+            parent_col.children.link(batch_col)
+            
+            if generate_mesh:
+                import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
+            else:
+                import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
+            
+            create_cameras(combined_predictions, collection=batch_col)
+        except Exception as e:
+            # end_progress_timer()
+            import traceback
+            print("DA3 ERROR while adding point clouds to Blender:")
             traceback.print_exc()
             base_model = None
             metric_model = None
@@ -695,7 +898,6 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             unload_current_model()  # Free VRAM on error
             self.report({'ERROR'}, f"Failed to generate point cloud: {e}")
             return {'CANCELLED'}
-        return {'FINISHED'}
 
     @classmethod
     def poll(cls, context):

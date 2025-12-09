@@ -15,10 +15,14 @@ from depth_anything_3.utils.alignment import (
     set_sky_regions_to_max_depth,
 )
 
-def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
+def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics, progress_callback=None):
     N, H, W = depth.shape
     world_points = np.zeros((N, H, W, 3), dtype=np.float32)
     for i in range(N):
+        if progress_callback:
+            if progress_callback(i / N * 100):
+                return None
+
         u, v = np.meshgrid(np.arange(W), np.arange(H))
         pixels = np.stack([u, v, np.ones((H, W))], axis=-1).reshape(-1, 3)  # HW, 3
         invK = np.linalg.inv(intrinsics[i])
@@ -31,10 +35,26 @@ def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
         world_points_hom = (cam_to_world @ cam_points_hom.T).T  # HW, 4
         world_points_i = world_points_hom[:, :3] / world_points_hom[:, 3:4]
         world_points[i] = world_points_i.reshape(H, W, 3)
+
+    if progress_callback:
+        progress_callback(100)
+
     return world_points
 
-def run_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False, use_ray_pose=False):
+def run_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False, use_ray_pose=False, progress_callback=None):
     print(f"Processing {len(image_paths)} images")
+    if not image_paths:
+        raise ValueError("No images provided.")
+    
+    cancelled = False
+    def model_progress_callback(step, total):
+        nonlocal cancelled
+        if progress_callback:
+            if progress_callback(step / total * 50):
+                cancelled = True
+                return True
+        return False
+
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         allocated = torch.cuda.memory_allocated() / 1024**2
@@ -43,11 +63,21 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
         total_mb = total / 1024**2
         print(f"VRAM before inference: {allocated:.1f} MB (free: {free_mb:.1f} MB / {total_mb:.1f} MB)")
     import torch.cuda.amp as amp
-    if use_half:
-        with amp.autocast():
+
+    # Not sure why the pull request thinks there's a progress_callback parameter, but try it first just in case there is for some reason
+    try:
+        if use_half:
+            with amp.autocast():
+                prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose, progress_callback=model_progress_callback)
+        else:
+            prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose, progress_callback=model_progress_callback)
+    except TypeError:
+        if use_half:
+            with amp.autocast():
+                prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
+        else:
             prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
-    else:
-        prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
+
     if torch.cuda.is_available():
         peak = torch.cuda.max_memory_allocated() / 1024**2
         allocated = torch.cuda.memory_allocated() / 1024**2
@@ -61,6 +91,9 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
         print("DEBUG prediction.__dict__ keys:", list(prediction.__dict__.keys()))
     else:
         print("DEBUG dir(prediction):", dir(prediction))
+
+    if cancelled:
+        return None
     return prediction
 
 # Helper functions for matrix operations and type conversion
@@ -374,7 +407,7 @@ def compute_motion_scores(predictions, threshold_ratio=0.1):
         b_idx, f_idx = frame_mapping[i]
         predictions[b_idx].motion[f_idx] = full_motion.reshape(H, W)
 
-def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images=False, segmentation_data=None, class_names=None):
+def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images=False, segmentation_data=None, class_names=None, progress_callback=None):
     predictions = {}
 
     # images is already numpy in your current pipeline
@@ -568,12 +601,25 @@ def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images
     if prediction.extrinsics is None or prediction.intrinsics is None:
         raise ValueError("Prediction has no camera parameters; cannot create world-space point cloud.")
 
-    world_points = unproject_depth_map_to_point_map(
-        predictions['depth'],
-        predictions['extrinsic'],
-        predictions['intrinsic'],
-    )
+    cancelled = False
+    def unproject_progress_callback(progress):
+        nonlocal cancelled
+        if progress_callback:
+            if progress_callback(50 + progress / 2):
+                cancelled = True
+                return True
+        return False
+
+    world_points = unproject_depth_map_to_point_map(predictions['depth'], predictions['extrinsic'], predictions['intrinsic'], unproject_progress_callback)
+
+    if cancelled:
+        return None
+
     predictions["world_points_from_depth"] = world_points
+
+    if progress_callback:
+        progress_callback(100)
+
     return predictions
 
 # Based on da3_repo/src/depth_anything_3/model/da3.py
