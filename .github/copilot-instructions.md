@@ -3,77 +3,74 @@
 These instructions are for AI coding agents working in this repo (Blender addon wrapping Depth-Anything-3).
 
 ## Big Picture
-- **Goal:** Blender addon to run Depth Anything 3 (DA3) on a folder of images and import a **metric-aware point cloud + cameras** as geometry nodes in Blender.
-- **Two layers:**
-  - **Addon layer (this repo root):** Blender UI, operators, dependency management, point-cloud import logic.
-  - **DA3 library layer (`da3_repo` / `deps_da3`):** vendored Depth-Anything-3 repo used as a dependency; avoid modifying it unless explicitly asked.
-- **Runtime flow:**
-  1. `__init__.py` → `Dependencies.check()/install()` → sets up `deps_public`, `deps_da3`, `da3_repo` and installs Python deps.
-  2. `register()` in `__init__.py` registers operators in `operators.py` and panel in `panels.py`, and adds `Scene` properties.
-  3. User selects images folder + model in the DA3 panel and runs `GeneratePointCloudOperator`.
-  4. `operators.get_model()` calls DA3 API (`depth_anything_3.api.DepthAnything3`), runs inference via `utils.run_model`, then `utils.convert_prediction_to_dict`, `utils.unproject_depth_map_to_point_map`, `utils.import_point_cloud`, and `utils.create_cameras` build Blender objects.
+- **Goal:** Convert a folder of images (or video) into a complete, detailed, high-resolution 3D scene in Blender.
+  - **Ideal Outcome:** Correctly scaled scene with separate, named objects. Static parts grouped and always visible; moving parts separated and animated. Output as textured 3D meshes (exportable) or point clouds.
+  - **Current State:** Blender addon wrapping Depth Anything 3 (DA3) to import metric-aware point clouds/meshes + cameras.
+- **Constraints & Challenges:**
+  - **Hardware:** Must run on low VRAM (e.g., 4GB GTX 970). This necessitates strict batching (e.g., ~10 images at 504x280).
+  - **Alignment:** DA3 aligns well within batches but poorly between batches. We currently separate geometry by batch to allow manual user tweaking.
+  - **Artifacts:** Depth antialiasing at object edges creates "streamers" that require filtering.
+  - **Model Capabilities:**
+    - **Metric Model:** Provides metric depth & sky detection but **NO** camera intrinsics/extrinsics.
+    - **Small/Base/Large/Giant:** Provide camera intrinsics/extrinsics & relative depth but **NO** sky detection or metric scale.
+    - **Strategy:** We often need to combine outputs (e.g., use Large for cameras and Metric for scale).
+- **Architecture:**
+  - **Addon Layer:** `__init__.py`, `operators.py`, `panels.py`, `utils.py`, `dependencies.py`. Handles UI, threading, and Blender data creation.
+  - **Library Layer:** `da3_repo` (vendored source) and `deps_da3`/`deps_public` (installed wheels).
+- **Runtime Flow:**
+  1. `__init__.py` registers classes and checks dependencies via `dependencies.py`.
+  2. `GeneratePointCloudOperator` (modal) starts a background thread for inference.
+  3. Worker thread runs DA3 model (via `utils.run_model`), handles batching/alignment, and puts results in a `queue`.
+  4. Main thread (`modal` method) consumes queue to create Blender objects (Point Clouds, Meshes, Cameras).
 
-## Key Files & Responsibilities
-- `__init__.py`
-  - Defines `bl_info` and Blender `register()/unregister()` entry points.
-  - Wires **scene-level properties**: `da3_input_folder`, `da3_model_name` enum, `da3_use_metric` bool.
-  - **Pattern:** keep this file minimal and limited to registration + high-level dependency checks.
-- `dependencies.py`
-  - Handles **cloning** `Depth-Anything-3` into `da3_repo` and installing Python deps into `deps_public` and `deps_da3` using `pip --target`.
-  - Injects `deps_public`, `deps_da3`, and `da3_repo` into `sys.path` before anything else imports DA3.
-  - `Dependencies.check()` uses `pkg_resources.WorkingSet` and `requirements_for_check.txt` to validate minimal deps. Prefer updating `requirements_for_check.txt` when **required runtime packages** change.
-  - Do **not** change clone URL or install strategy lightly; Blender users often have constrained Python environments.
-- `operators.py`
-  - Holds the two main operators:
-    - `DownloadModelOperator`: downloads `.safetensors` weights into local `MODELS_DIR` using `torch.hub.download_url_to_file` using the `_URLS` map.
-    - `GeneratePointCloudOperator`: runs DA3 inference on a folder and imports the result into Blender.
-  - Global model cache (`model`, `current_model_name`) is used to **reuse a single DA3 model in VRAM** between runs; use `unload_current_model()` before loading another heavy model.
-  - **Metric depth:** if `Scene.da3_use_metric` is true and `da3metric-large` weights are present, it runs a second model and calls `utils.combine_base_and_metric` to align and scale depth + extrinsics.
-  - New operators should:
-    - Inherit `bpy.types.Operator` and use `bl_idname` in the `da3.*` namespace.
-    - Be **registered only** via `__init__.register()` to avoid double-registration.
-- `panels.py`
-  - Defines the **UI panel** `DA3Panel` in the 3D Viewport sidebar.
-  - Uses `get_model_path()` from `operators.py` to show “ready” vs “download” state for both base and metric models.
-  - **Nested metric logic:** hides `da3_use_metric` when `da3_model_name == "da3nested-giant-large"` since that model is intrinsically metric.
-- `utils.py`
-  - `run_model(target_dir, model)`: discovers images (`*.[jJpP][pPnN][gG]`) and calls `model.inference(image_paths)`.
-  - `convert_prediction_to_dict(prediction, image_paths)`: standardizes DA3 prediction into a dict with numpy arrays and computes `world_points_from_depth` via `unproject_depth_map_to_point_map`.
-  - `combine_base_and_metric(base, metric)`: DA3-specific alignment logic ported from `da3_repo` to scale base depth and extrinsics using metric model outputs and sky masks.
-  - `import_point_cloud(d, collection)`: creates a `Points` mesh, sets up `FLOAT_COLOR` and `conf` attributes, and builds a **Geometry Nodes** tree that filters points by `conf` and applies proper material.
-  - `create_cameras(predictions, collection, image_width, image_height)`: creates cameras from intrinsics/extrinsics, sets sensor/lens/shift, and names cameras using image filenames when available.
-  - When updating anything here, preserve **array shape expectations** and coordinate system conversions; many pieces are interdependent.
-- `da3_repo/` (Depth-Anything-3 upstream)
-  - Treat as **third-party library**. Use its public API (`depth_anything_3.api.DepthAnything3`, configs) from the addon; do not change files here unless explicitly requested.
+## Key Patterns & Conventions
+
+### 1. Threading & UI Responsiveness
+- **Pattern:** Long-running tasks (Inference, Download) should preferably run in a separate thread to avoid freezing Blender's UI.
+- **Implementation:**
+  - `invoke()`: Initialize `threading.Thread`, `queue.Queue`, and `wm.event_timer_add`. Return `{'RUNNING_MODAL'}`.
+  - `modal()`: On `TIMER` event, check `queue`. Process results (e.g., create objects) in the **main thread** (Blender API is not thread-safe).
+  - **Example:** `GeneratePointCloudOperator` in `operators.py`.
+
+### 2. Dependency Management (`dependencies.py`)
+- **Mechanism:** Dependencies are installed locally into `deps_public` and `deps_da3` using `pip --target`.
+- **Path Injection:** `sys.path` is modified at runtime to prioritize these local folders.
+- **Rule:** Do not assume standard site-packages availability. Use `Dependencies.check()` and `Dependencies.install()`.
+
+### 3. Coordinate Systems & Data Conversion
+- **DA3/OpenCV:** Y-down, Z-forward.
+- **Blender:** Z-up, Y-forward.
+- **Conversion:**
+  - Points: Swap Y/Z and invert Z. See `import_point_cloud` in `utils.py`.
+  - Cameras: Apply -90 degree rotation on X axis. See `create_cameras` in `utils.py`.
+- **Arrays:** Maintain `[N, H, W]` shape for depth/confidence maps.
+
+### 4. Geometry Nodes & Materials
+- **Point Clouds:** Created as Meshes with `GeometryNodes` modifier for rendering points.
+- **Filtering:** `GeometryNodes` tree filters points dynamically based on `conf` attribute (Confidence).
+- **Materials:** Procedural shader (`PointMaterial`) visualizes confidence or RGB colors.
+- **Meshes:** `import_mesh_from_depth` creates textured meshes instead of point clouds.
+
+## Key Files
+- **`operators.py`**:
+  - `GeneratePointCloudOperator`: Core logic. Handles batching (`skip_frames`, `overlap`), metric depth combination, and segmentation/motion detection calls.
+  - `DownloadModelOperator`: Downloads weights to `models/`.
+- **`utils.py`**:
+  - `run_model`: Interface to DA3 API.
+  - `align_batches`: Aligns depth/extrinsics between batches using overlapping frames.
+  - `import_point_cloud` / `import_mesh_from_depth`: Blender object creation.
+  - `combine_base_and_metric`: Scales relative depth using metric model.
+- **`__init__.py`**: Registry and `Scene` properties definitions. Keep minimal.
 
 ## Developer Workflows
-- **Blender addon install & deps**
-  - Users install the addon zip in Blender; on first enable, `Dependencies.install()` is triggered automatically and may take several minutes.
-  - To debug dependency issues, log prints in `dependencies.py` are surfaced in Blender’s **System Console**.
-- **Local Python / DA3 debugging (outside Blender)**
-  - DA3 core lives in `da3_repo`. For non-Blender experiments, use its own `pyproject.toml`, `README.md`, and CLI docs under `docs/` and `src/`.
-  - Keep **addon-facing utility code** in `utils.py` rather than duplicating DA3 internals here.
+- **Debugging:** Use `print()` which outputs to **Window > Toggle System Console**.
+- **Model Management:** Models are cached in `operators.model`. Use `unload_current_model()` to free VRAM.
+- **New Features:**
+  - Add UI props in `__init__.py`.
+  - Implement logic in `operators.py` (threading) or `utils.py` (math/blender).
+  - **Do not** modify `da3_repo` unless absolutely necessary.
 
-## Conventions & Patterns
-- **Imports:**
-  - Addon code imports DA3 as `from depth_anything_3.api import DepthAnything3` and utilities from `depth_anything_3.utils.alignment`.
-  - Any new usage of DA3 should follow this pattern and **not** rely on private modules unless necessary.
-- **Paths & models:**
-  - Model weights live in a `models/` directory next to addon files; use `get_model_path(model_name)` and extend `_URLS` consistently for new models.
-- **Blender data structures:**
-  - Use `bpy.data.collections` and link objects to a per-run collection named after the input folder (see `GeneratePointCloudOperator`). New geometry/camera-generating features should reuse this pattern for organization.
-  - Geometry Nodes graphs created in `import_point_cloud` should stay minimal and parameterized through **Group Inputs** (e.g., `Threshold`).
-- **Error handling:**
-  - Operators should use `self.report({"ERROR"|"WARNING"|"INFO"}, message)` and avoid raising bare exceptions; only throw in `Dependencies` / bootstrap code where Blender can’t continue.
-  - For DA3 prediction issues, prefer printing a traceback (as in `GeneratePointCloudOperator.execute`) plus a concise user-facing error message.
-
-## When Editing or Adding Code
-- Prefer editing **addon wrapper code** (`__init__.py`, `operators.py`, `panels.py`, `utils.py`, `dependencies.py`) rather than the vendored DA3 core.
-- When changing data flow between DA3 and Blender, verify these invariants:
-  - `prediction.depth` → `[N, H, W]` float32 (torch or numpy), aligned with `prediction.extrinsics` and `prediction.intrinsics`.
-  - `convert_prediction_to_dict` continues to populate `world_points_from_depth`, `images`, `depth`, `extrinsic`, `intrinsic`, `conf` with consistent shapes.
-  - Cameras and point clouds remain in a **coherent coordinate system** (see the axis reordering and sign flip in `import_point_cloud`, and `T` + rotation in `create_cameras`).
-- Before adding new features, consider whether they belong:
-  - in `operators.py` (user-triggered actions),
-  - in `utils.py` (math / conversion code), or
-  - in DA3 core (`da3_repo`) as a reusable primitive.
+## Specific Logic
+- **Batching:** To support low VRAM, images are processed in batches. Alignment logic (`align_single_batch`) scales and transforms batches to match the previous one.
+- **Metric Depth:** If enabled, runs a second pass with `da3metric-large` and scales the base model's output.
+- **Segmentation/Motion:** Optional steps running YOLO or motion scoring before/after depth inference.
