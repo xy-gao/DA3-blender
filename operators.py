@@ -14,6 +14,7 @@ from .utils import (
     import_mesh_from_depth,
     create_cameras,
     align_batches,
+    align_single_batch,
     compute_motion_scores,
 )
 import urllib.request
@@ -466,6 +467,40 @@ class GeneratePointCloudOperator(bpy.types.Operator):
 
         return {'RUNNING_MODAL'}
 
+    def handle_batch_result(self, prediction, batch_indices, batch_number, folder_name, all_segmentation_data, segmentation_class_names):
+        # Detect motion for this batch only if enabled (suboptimal but better than nothing?)
+        # Or just skip motion detection for incremental updates?
+        # The user didn't specify, but "results as soon as ready" implies we don't wait.
+        if self.detect_motion:
+             compute_motion_scores([prediction], threshold_ratio=self.motion_threshold)
+
+        # Extract segmentation data for this batch
+        batch_segmentation = None
+        if all_segmentation_data:
+            batch_segmentation = [all_segmentation_data[j] for j in batch_indices]
+        
+        batch_paths = [self.image_paths[j] for j in batch_indices]
+
+        combined_predictions = convert_prediction_to_dict(
+            prediction, 
+            batch_paths, 
+            output_debug_images=self.output_debug_images,
+            segmentation_data=batch_segmentation,
+            class_names=segmentation_class_names
+        )
+        
+        # Create batch collection
+        self.result_queue.put({
+            "type": "BATCH_READY",
+            "data": combined_predictions,
+            "batch_number": batch_number,
+            "folder_name": folder_name,
+            "batch_indices": batch_indices,
+            "generate_mesh": self.generate_mesh,
+            "filter_edges": self.filter_edges,
+            "min_confidence": self.min_confidence
+        })
+
     def generate_worker(self, context):
         try:
             # Get image paths
@@ -537,6 +572,10 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 if all_segmentation_data is None:
                     print("Segmentation failed or cancelled. Proceeding without segmentation.")
 
+            # Prepare for import
+            folder_name = os.path.basename(os.path.normpath(self.input_folder))
+            self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
+
             # 1) run base model
             self.update_progress_timer(LoadModelTime, f"Loading {self.base_model_name} model...")
             base_model = get_model(self.base_model_name)
@@ -544,6 +583,25 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             print("Running base model inference...")
             
             all_base_predictions = []
+            prev_pred = None
+            prev_indices = None
+            batch_counter = 0
+            
+            # Helper to process result immediately if not using metric
+            def process_result_if_ready(prediction, indices):
+                nonlocal prev_pred, prev_indices, batch_counter
+                if not self.use_metric:
+                    # Align if needed
+                    if prev_pred is not None and self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
+                        prediction = align_single_batch(prediction, indices, prev_pred, prev_indices)
+                    
+                    prev_pred = prediction
+                    prev_indices = indices
+                    
+                    self.handle_batch_result(prediction, indices, batch_counter, folder_name, all_segmentation_data, segmentation_class_names)
+                    batch_counter += 1
+                else:
+                    all_base_predictions.append((prediction, indices))
             
             if self.batch_mode == "no_overlap":
                 num_batches = (len(self.image_paths) + self.batch_size - 1) // self.batch_size
@@ -555,7 +613,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                     print(f"Batch {batch_idx + 1}/{num_batches}:")
                     prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
                     self.update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
-                    all_base_predictions.append((prediction, batch_indices))
+                    process_result_if_ready(prediction, batch_indices)
 
             elif self.batch_mode in {"last_frame_overlap", "first_last_overlap"}:
                 if self.batch_mode == "last_frame_overlap":
@@ -568,7 +626,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         print(f"Batch {batch_idx + 1}/{num_batches}:")
                         prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
                         self.update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
-                        all_base_predictions.append((prediction, batch_indices))
+                        process_result_if_ready(prediction, batch_indices)
                 else:
                     # New scheme: (0..9) (0, 9, 10..17) (10, 17, 18..25)
                     N = len(self.image_paths)
@@ -597,7 +655,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                         prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
                         end_idx = batch_indices[-1] + 1
                         self.update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
-                        all_base_predictions.append((prediction, batch_indices.copy()))
+                        process_result_if_ready(prediction, batch_indices.copy())
 
                         if remaining_start >= N:
                             break
@@ -619,9 +677,14 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             else:
                 prediction = run_model(self.image_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
                 self.update_progress_timer(LoadModelTime + len(self.image_paths) * BatchTimePerImage, "Base batch complete")
-                all_base_predictions.append((prediction, list(range(len(self.image_paths)))))
+                process_result_if_ready(prediction, list(range(len(self.image_paths))))
             
             self.update_progress_timer(BaseTimeEstimate, "Base inference complete")
+
+            # If NOT using metric, we are done!
+            if not self.use_metric:
+                self.result_queue.put({"type": "DONE"})
+                return
 
             # 2) if metric enabled and weights available:
             all_metric_predictions = []
@@ -764,37 +827,38 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 self.update_progress_timer(AfterCombineTimeEstimate + 1.0, "Motion detection complete")
 
             # Prepare for import
-            folder_name = os.path.basename(os.path.normpath(self.input_folder))
-            self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
+            # folder_name = os.path.basename(os.path.normpath(self.input_folder))
+            # self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
 
             for batch_number, batch_prediction in enumerate(all_combined_predictions):
                 batch_indices = all_base_predictions[batch_number][1]
-                batch_paths = [self.image_paths[j] for j in batch_indices]
+                # batch_paths = [self.image_paths[j] for j in batch_indices]
                 
                 # Extract segmentation data for this batch
-                batch_segmentation = None
-                if all_segmentation_data:
-                    batch_segmentation = [all_segmentation_data[j] for j in batch_indices]
+                # batch_segmentation = None
+                # if all_segmentation_data:
+                #     batch_segmentation = [all_segmentation_data[j] for j in batch_indices]
 
-                combined_predictions = convert_prediction_to_dict(
-                    batch_prediction, 
-                    batch_paths, 
-                    output_debug_images=self.output_debug_images,
-                    segmentation_data=batch_segmentation,
-                    class_names=segmentation_class_names
-                )
+                # combined_predictions = convert_prediction_to_dict(
+                #     batch_prediction, 
+                #     batch_paths, 
+                #     output_debug_images=self.output_debug_images,
+                #     segmentation_data=batch_segmentation,
+                #     class_names=segmentation_class_names
+                # )
                 
-                # Create batch collection
-                self.result_queue.put({
-                    "type": "BATCH_READY",
-                    "data": combined_predictions,
-                    "batch_number": batch_number,
-                    "folder_name": folder_name,
-                    "batch_indices": batch_indices,
-                    "generate_mesh": self.generate_mesh,
-                    "filter_edges": self.filter_edges,
-                    "min_confidence": self.min_confidence
-                })
+                # # Create batch collection
+                # self.result_queue.put({
+                #     "type": "BATCH_READY",
+                #     "data": combined_predictions,
+                #     "batch_number": batch_number,
+                #     "folder_name": folder_name,
+                #     "batch_indices": batch_indices,
+                #     "generate_mesh": self.generate_mesh,
+                #     "filter_edges": self.filter_edges,
+                #     "min_confidence": self.min_confidence
+                # })
+                self.handle_batch_result(batch_prediction, batch_indices, batch_number, folder_name, all_segmentation_data, segmentation_class_names)
             
             self.result_queue.put({"type": "DONE"})
 
