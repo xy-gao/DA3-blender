@@ -185,6 +185,10 @@ def register_classes():
         min=-1.0,
         max=100.0
     )
+    bpy.types.Scene.da3_progress_stage = bpy.props.StringProperty(
+        name="Progress Stage",
+        default="",
+    )
 
 def unregister_classes():
     from . import operators, panels
@@ -212,6 +216,7 @@ def unregister_classes():
     del bpy.types.Scene.da3_segmentation_model
     del bpy.types.Scene.da3_segmentation_conf
     del bpy.types.Scene.da3_progress
+    del bpy.types.Scene.da3_progress_stage
 
 class DA3InstallDepsPanel(bpy.types.Panel):
     bl_label = "DA3 Dependencies"
@@ -231,17 +236,22 @@ classes = [
     DA3InstallDepsOperator,
 ]
 
+classes_registered = False
+
 def register():
+    global classes_registered
     for cls in classes:
         bpy.utils.register_class(cls)
 
     if Dependencies.check():
         register_classes()
+        classes_registered = True
     else:
         bpy.utils.register_class(DA3InstallDepsPanel)
 
 def unregister():
-    if Dependencies.check():
+    global classes_registered
+    if classes_registered:
         unregister_classes()
     else:
         bpy.utils.unregister_class(DA3InstallDepsPanel)

@@ -46,15 +46,6 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
     if not image_paths:
         raise ValueError("No images provided.")
     
-    cancelled = False
-    def model_progress_callback(step, total):
-        nonlocal cancelled
-        if progress_callback:
-            if progress_callback(step / total * 50):
-                cancelled = True
-                return True
-        return False
-
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         allocated = torch.cuda.memory_allocated() / 1024**2
@@ -64,19 +55,11 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
         print(f"VRAM before inference: {allocated:.1f} MB (free: {free_mb:.1f} MB / {total_mb:.1f} MB)")
     import torch.cuda.amp as amp
 
-    # Not sure why the pull request thinks there's a progress_callback parameter, but try it first just in case there is for some reason
-    try:
-        if use_half:
-            with amp.autocast():
-                prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose, progress_callback=model_progress_callback)
-        else:
-            prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose, progress_callback=model_progress_callback)
-    except TypeError:
-        if use_half:
-            with amp.autocast():
-                prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
-        else:
+    if use_half:
+        with amp.autocast():
             prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
+    else:
+        prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
 
     if torch.cuda.is_available():
         peak = torch.cuda.max_memory_allocated() / 1024**2
@@ -92,8 +75,6 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
     else:
         print("DEBUG dir(prediction):", dir(prediction))
 
-    if cancelled:
-        return None
     return prediction
 
 # Helper functions for matrix operations and type conversion
