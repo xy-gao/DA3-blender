@@ -1,6 +1,7 @@
 import bpy
 from pathlib import Path
 import os
+import shutil
 import torch
 import numpy as np
 import time
@@ -20,11 +21,25 @@ from .utils import (
 import urllib.request
 import threading
 import queue
+from . import DEFAULT_MODELS_DIR, get_configured_model_folder, get_prefs
 
 
+def get_any_model_path(model_filename, context=None):
+    # Check configured folder first
+    configured_folder = get_configured_model_folder(context)
+        
+    configured_path = os.path.join(configured_folder, model_filename)
+    if os.path.exists(configured_path):
+        return configured_path
+        
+    # Check default folder
+    default_path = os.path.join(DEFAULT_MODELS_DIR, model_filename)
+    if os.path.exists(default_path):
+        return default_path
+        
+    # If not found, return configured path for download
+    return configured_path
 
-add_on_path = Path(__file__).parent
-MODELS_DIR = os.path.join(add_on_path, 'models')
 _URLS = {
     'da3-small': "https://huggingface.co/depth-anything/DA3-SMALL/resolve/main/model.safetensors",
     'da3-base': "https://huggingface.co/depth-anything/DA3-BASE/resolve/main/model.safetensors",
@@ -51,8 +66,8 @@ _URLS = {
 model = None
 current_model_name = None
 
-def get_model_path(model_name):
-    return os.path.join(MODELS_DIR, f'{model_name}.safetensors')
+def get_model_path(model_name, context=None):
+    return get_any_model_path(f'{model_name}.safetensors', context)
 
 def display_VRAM_usage(stage: str, include_peak=False):
     if torch.cuda.is_available():
@@ -112,16 +127,17 @@ def run_segmentation(image_paths, conf_threshold=0.25, model_name="yolo11x-seg")
 
     # Use selected model
     # model_name passed as argument
-    model_path = os.path.join(MODELS_DIR, f"{model_name}.pt")
+    model_path = get_any_model_path(f"{model_name}.pt")
     
     if not os.path.exists(model_path):
         print(f"Downloading {model_name} to {model_path}...")
         url = _URLS.get(model_name, "")
         if not url:
-            print(f"Error: No URL known for {model_name}. Please download {model_name}.pt manually to {MODELS_DIR}")
+            print(f"Error: No URL known for {model_name}. Please download {model_name}.pt manually to {os.path.dirname(model_path)}")
             return None, None
             
         try:
+            os.makedirs(os.path.dirname(model_path), exist_ok=True)
             torch.hub.download_url_to_file(url, model_path)
         except Exception as e:
             print(f"Failed to download {model_name}: {e}")
@@ -256,7 +272,7 @@ class DownloadModelOperator(bpy.types.Operator):
 
     def invoke(self, context, event):
         model_name = self.da3_override_model_name or context.scene.da3_model_name
-        self.model_path = get_model_path(model_name)
+        self.model_path = get_model_path(model_name, context)
         
         if os.path.exists(self.model_path):
             self.report({'INFO'}, f"Model {model_name} already downloaded.")
@@ -284,7 +300,7 @@ class DownloadModelOperator(bpy.types.Operator):
     def download_file(self, url, path, context):
         try:
             print(f"Downloading model {url.split('/')[-2]}...")
-            os.makedirs(MODELS_DIR, exist_ok=True)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
 
             with urllib.request.urlopen(url) as response:
                 total_size = int(response.info().get('Content-Length', -1))
@@ -443,6 +459,9 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.segmentation_model = getattr(context.scene, "da3_segmentation_model", "yolo11x-seg")
         self.detect_motion = getattr(context.scene, "da3_detect_motion", False)
         self.motion_threshold = getattr(context.scene, "da3_motion_threshold", 0.1)
+        
+        # Prime the model folder cache in the main thread
+        get_configured_model_folder(context)
         
         if self.process_res % 14 != 0:
             self.report({'ERROR'}, "Process resolution must be a multiple of 14.")
@@ -988,5 +1007,5 @@ class GeneratePointCloudOperator(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         model_name = context.scene.da3_model_name
-        model_path = get_model_path(model_name)
+        model_path = get_model_path(model_name, context)
         return os.path.exists(model_path) and context.scene.da3_input_folder != ""

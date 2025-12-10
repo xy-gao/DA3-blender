@@ -11,6 +11,66 @@ bl_info = {
 import bpy
 from .dependencies import Dependencies
 import os
+import shutil
+from pathlib import Path
+
+add_on_path = Path(__file__).parent
+DEFAULT_MODELS_DIR = os.path.join(add_on_path, 'models')
+_cached_model_folder = None
+
+def get_prefs(context=None):
+    if context is None:
+        try:
+            context = bpy.context
+        except AttributeError:
+            return None
+    package_name = __name__.split('.')[0]
+    addon = context.preferences.addons.get(package_name)
+    return addon.preferences if addon else None
+
+def get_configured_model_folder(context=None):
+    global _cached_model_folder
+    prefs = get_prefs(context)
+    if prefs:
+        _cached_model_folder = getattr(prefs, 'model_folder_path', '')
+        return _cached_model_folder
+    if _cached_model_folder is not None:
+        return _cached_model_folder
+    return DEFAULT_MODELS_DIR
+
+class MoveModelsOperator(bpy.types.Operator):
+    bl_idname = "da3.move_models"
+    bl_label = "Move Models to Custom Folder"
+    bl_description = "Move downloaded models from the default folder to the specified custom folder"
+    
+    def execute(self, context):
+        target_dir = get_configured_model_folder(context)
+        if target_dir == DEFAULT_MODELS_DIR:
+            self.report({'WARNING'}, "Custom model folder is not set or same as default.")
+            return {'CANCELLED'}
+            
+        if not os.path.exists(DEFAULT_MODELS_DIR):
+             self.report({'INFO'}, "No default models folder found.")
+             return {'FINISHED'}
+
+        if not os.path.exists(target_dir):
+            os.makedirs(target_dir)
+            
+        moved_count = 0
+        for filename in os.listdir(DEFAULT_MODELS_DIR):
+            if filename == ".gitkeep":
+                continue
+            src_path = os.path.join(DEFAULT_MODELS_DIR, filename)
+            if os.path.isfile(src_path):
+                dst_path = os.path.join(target_dir, filename)
+                if not os.path.exists(dst_path):
+                    shutil.move(src_path, dst_path)
+                    moved_count += 1
+                else:
+                    print(f"Skipping {filename}, already exists in target.")
+        
+        self.report({'INFO'}, f"Moved {moved_count} files to {target_dir}")
+        return {'FINISHED'}
 
 class DA3InstallDepsOperator(bpy.types.Operator):
     bl_idname = "da3.install_dependencies"
@@ -29,8 +89,26 @@ class DA3InstallDepsOperator(bpy.types.Operator):
 class DA3AddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
 
+    model_folder_path: bpy.props.StringProperty(
+        name="Model Folder",
+        description="Custom folder to store downloaded models. If empty, uses default addon folder.",
+        subtype='DIR_PATH',
+        default=""
+    )
+
     def draw(self, context):
         layout = self.layout
+        
+        # Model folder settings
+        box = layout.box()
+        box.label(text="Model Storage")
+        box.prop(self, "model_folder_path")
+        
+        row = box.row()
+        row.operator("da3.move_models", text="Move Existing Models to Custom Folder")
+        
+        layout.separator()
+
         if not Dependencies.check():
             layout.label(text="Dependencies are not installed.")
             layout.operator(DA3InstallDepsOperator.bl_idname, text="Install Dependencies")
@@ -234,6 +312,7 @@ class DA3InstallDepsPanel(bpy.types.Panel):
 classes = [
     DA3AddonPreferences,
     DA3InstallDepsOperator,
+    MoveModelsOperator,
 ]
 
 classes_registered = False
