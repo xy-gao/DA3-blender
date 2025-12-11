@@ -1,7 +1,7 @@
 bl_info = {
     "name": "DA3 Addon",
-    "author": "Xiangyi Gao",
-    "version": (1, 0),
+    "author": "Xiangyi Gao, Carl Kenner",
+    "version": (1, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > DA3",
     "description": "Generate point clouds from images using DA3",
