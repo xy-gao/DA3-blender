@@ -3,6 +3,7 @@ from pathlib import Path
 import os
 import shutil
 import torch
+from collections import Counter
 import numpy as np
 import time
 import datetime
@@ -82,6 +83,16 @@ def display_VRAM_usage(stage: str, include_peak=False):
         print(msg)
 
 
+def _summarize_model_dtypes(mod):
+    # Lightweight dtype/device counter for debugging footprint
+    counts = Counter()
+    for p in mod.parameters():
+        counts[(p.dtype, p.device)] += p.numel()
+    for b in mod.buffers():
+        counts[(b.dtype, b.device)] += b.numel()
+    return counts
+
+
 def get_model(model_name):
     global model, current_model_name
     if model is None or current_model_name != model_name:
@@ -100,6 +111,16 @@ def get_model(model_name):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model.to(device)
         model.eval()
+        # Debug: show where weights live and their dtypes to help diagnose overcommit/paging
+        try:
+            first_param = next(model.parameters())
+            print(f"Model device: {first_param.device}, dtype: {first_param.dtype}")
+            if torch.cuda.is_available():
+                print(f"CUDA device: {torch.cuda.get_device_name(0)}; reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB")
+            dtype_counts = _summarize_model_dtypes(model)
+            print("Model dtype summary (dtype, device -> numel):", dict(dtype_counts))
+        except StopIteration:
+            print("Model has no parameters to summarize.")
         current_model_name = model_name
         display_VRAM_usage(f"after loading {model_name}", include_peak=True)
     return model
