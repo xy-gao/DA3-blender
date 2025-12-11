@@ -24,6 +24,9 @@ class DA3Panel(bpy.types.Panel):
         else:
             row.operator("da3.download_model", text=f"Download {scene.da3_model_name}")
 
+        # Precision toggle near model selection for clarity
+        layout.prop(scene, "da3_load_half_precision", text="Use FP16 Weights (experimental)")
+
         # Metric model checkbox and download button/status
         if scene.da3_model_name != "da3nested-giant-large":
             layout.prop(scene, "da3_use_metric", text="Use Metric")
@@ -48,7 +51,6 @@ class DA3Panel(bpy.types.Panel):
             layout.prop(scene, "da3_batch_size", text="Batch Size")
         layout.prop(scene, "da3_use_ray_pose", text="Use Ray-based Pose")
         layout.prop(scene, "da3_use_half_precision", text="Use Half Precision")
-        layout.prop(scene, "da3_load_half_precision", text="Load Weights in Half (experimental)")
         layout.prop(scene, "da3_filter_edges", text="Filter Edges")
         layout.prop(scene, "da3_min_confidence", text="Min Confidence")
         layout.prop(scene, "da3_detect_motion", text="Detect Motion")

@@ -172,8 +172,8 @@ def register_classes():
         default=False,
     )
     bpy.types.Scene.da3_load_half_precision = bpy.props.BoolProperty(
-        name="Load Weights in Half",
-        description="Load model weights/buffers in 16-bit to reduce VRAM (experimental)",
+        name="Use FP16 Weights (experimental)",
+        description="Load model weights/buffers in 16-bit to reduce VRAM; may affect stability/accuracy",
         default=False,
     )
     bpy.types.Scene.da3_use_ray_pose = bpy.props.BoolProperty(
