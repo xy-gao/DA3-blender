@@ -47,19 +47,7 @@ class Dependencies:
                 return False
 
         # Ensure submodules are present (covers previous non-recursive clones)
-        try:
-            subprocess.check_call([
-                'git',
-                '-C',
-                os.fspath(DA3_DIR),
-                'submodule',
-                'update',
-                '--init',
-                '--recursive',
-            ])
-        except subprocess.CalledProcessError as e:
-            print('Caught Exception while trying to update DA3 submodules')
-            print(f'  Exception: {e}')
+        if not Dependencies._update_submodules():
             return False
         
         try:
@@ -142,15 +130,8 @@ class Dependencies:
                 ])
             else:
                 subprocess.check_call(['git', '-C', os.fspath(DA3_DIR), 'pull', '--ff-only'])
-                subprocess.check_call([
-                    'git',
-                    '-C',
-                    os.fspath(DA3_DIR),
-                    'submodule',
-                    'update',
-                    '--init',
-                    '--recursive',
-                ])
+                if not Dependencies._update_submodules():
+                    return False
 
             # Reinstall DA3 into deps_da3 to keep it in sync with the working tree
             if deps_path_da3.exists():
@@ -178,6 +159,27 @@ class Dependencies:
             return False
         except Exception as e:
             print(f'Caught Exception while updating DA3 repo')
+            print(f'  Exception: {e}')
+            return False
+
+    @staticmethod
+    def _update_submodules():
+        """Update all submodules including nested .gitmodules under da3_streaming."""
+        try:
+            # Root-level submodules
+            subprocess.check_call([
+                'git', '-C', os.fspath(DA3_DIR), 'submodule', 'update', '--init', '--recursive'
+            ])
+            # Handle nested .gitmodules under da3_streaming if present
+            streaming_dir = DA3_DIR / 'da3_streaming'
+            gitmodules_path = streaming_dir / '.gitmodules'
+            if gitmodules_path.exists():
+                subprocess.check_call([
+                    'git', '-C', os.fspath(streaming_dir), 'submodule', 'update', '--init', '--recursive'
+                ])
+            return True
+        except subprocess.CalledProcessError as e:
+            print('Caught Exception while trying to update submodules (including da3_streaming)')
             print(f'  Exception: {e}')
             return False
 
