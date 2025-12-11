@@ -46,7 +46,9 @@ _URLS = {
     'da3-small': "https://huggingface.co/depth-anything/DA3-SMALL/resolve/main/model.safetensors",
     'da3-base': "https://huggingface.co/depth-anything/DA3-BASE/resolve/main/model.safetensors",
     'da3-large': "https://huggingface.co/depth-anything/DA3-LARGE/resolve/main/model.safetensors",
+    'da3-large-1.1': "https://huggingface.co/depth-anything/DA3-LARGE-1.1/resolve/main/model.safetensors",
     'da3-giant': "https://huggingface.co/depth-anything/DA3-GIANT/resolve/main/model.safetensors",
+    'da3-giant-1.1': "https://huggingface.co/depth-anything/DA3-GIANT-1.1/resolve/main/model.safetensors",
     "da3metric-large": "https://huggingface.co/depth-anything/DA3METRIC-LARGE/resolve/main/model.safetensors",
     "da3mono-large": "https://huggingface.co/depth-anything/DA3MONO-LARGE/resolve/main/model.safetensors",
     "da3nested-giant-large": "https://huggingface.co/depth-anything/DA3NESTED-GIANT-LARGE/resolve/main/model.safetensors",
@@ -67,6 +69,12 @@ _URLS = {
     "yoloe-11l-seg-pf": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11l-seg-pf.pt",
 }
 NESTED_MODEL_NAMES = ("da3nested-giant-large", "da3nested-giant-large-1.1")
+CONFIG_NAME_MAP = {
+    # Map alt checkpoint labels to the existing config stem
+    "da3-large-1.1": "da3-large",
+    "da3-giant-1.1": "da3-giant",
+    "da3nested-giant-large-1.1": "da3nested-giant-large",
+}
 model = None
 current_model_name = None
 current_model_load_half = None
@@ -336,7 +344,8 @@ def get_model(model_name, load_half=False):
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         display_VRAM_usage(f"before loading {model_name}")
-        model = DepthAnything3(model_name=model_name)
+        config_model_name = CONFIG_NAME_MAP.get(model_name, model_name)
+        model = DepthAnything3(model_name=config_model_name)
         model_path = get_model_path(model_name)
         if os.path.exists(model_path):
             from safetensors.torch import load_file

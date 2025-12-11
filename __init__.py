@@ -149,16 +149,18 @@ def register_classes():
         items=[
             ('da3-small', 'DA3 Small', 'Small model for faster inference'),
             ('da3-base', 'DA3 Base', 'Base model with balanced performance'),
-            ('da3-large', 'DA3 Large', 'Large model for better quality'),
-            ('da3-giant', 'DA3 Giant', 'Giant model for highest quality'),
+            ('da3-large-1.1', 'DA3 Large 1.1', 'Large model retrained (preferred)'),
+            ('da3-giant-1.1', 'DA3 Giant 1.1', 'Giant model retrained (preferred)'),
             ("da3metric-large", "DA3 Metric Large", "Metric depth model"),
             ('da3mono-large', 'DA3 Mono Large', 'Single image depth estimation'),
-            ('da3nested-giant-large', 'DA3 Nested Giant Large', 'Nested depth estimation'),
             ('da3nested-giant-large-1.1', 'DA3 Nested Giant Large 1.1', 'Nested depth estimation (v1.1 checkpoint)'),
+            ('da3-large', 'DA3 Large (obsolete)', 'Large model for better quality'),
+            ('da3-giant', 'DA3 Giant (obsolete)', 'Giant model for highest quality'),
+            ('da3nested-giant-large', 'DA3 Nested Giant Large (obsolete)', 'Nested depth estimation'),
         ],
         name="Model",
         description="Select DA3 model variant",
-        default='da3-large'
+        default='da3-large-1.1'
     )
     bpy.types.Scene.da3_use_metric = bpy.props.BoolProperty(
         name="Use Metric",
