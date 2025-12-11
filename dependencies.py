@@ -177,6 +177,12 @@ class Dependencies:
                 subprocess.check_call([
                     'git', '-C', os.fspath(streaming_dir), 'submodule', 'update', '--init', '--recursive'
                 ])
+                # Fallback: ensure salad submodule exists even if nested update didn’t populate
+                salad_path = streaming_dir / 'loop_utils' / 'salad'
+                if not salad_path.exists():
+                    subprocess.check_call([
+                        'git', 'clone', 'https://github.com/serizba/salad.git', os.fspath(salad_path)
+                    ])
             return True
         except subprocess.CalledProcessError as e:
             print('Caught Exception while trying to update submodules (including da3_streaming)')
