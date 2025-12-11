@@ -231,6 +231,42 @@ def _patch_nested_alignment_fp16(model):
     da3_core._apply_depth_alignment = types.MethodType(_patched, da3_core)
 
 
+def _patch_nested_sky_fp16(model):
+    """
+    Monkeypatch nested giant sky handling to run quantile in fp32 without modifying deps on disk.
+    """
+    try:
+        from depth_anything_3.utils.alignment import set_sky_regions_to_max_depth, compute_sky_mask
+    except Exception as e:
+        print(f"Warning: could not import sky utils for nested patch: {e}")
+        return
+
+    da3_core = getattr(model, "model", None)
+    if da3_core is None:
+        return
+
+    orig_fn = getattr(da3_core, "_handle_sky_regions", None)
+    if orig_fn is None:
+        return
+
+    def _patched(self, output, metric_output, sky_depth_def: float = 200.0):
+        with torch.cuda.amp.autocast(enabled=False):
+            non_sky_mask = compute_sky_mask(metric_output.sky.float(), threshold=0.3)
+            non_sky_depth = output.depth.float()[non_sky_mask]
+            if non_sky_depth.numel() > 100000:
+                idx = torch.randint(0, non_sky_depth.numel(), (100000,), device=non_sky_depth.device)
+                sampled_depth = non_sky_depth[idx]
+            else:
+                sampled_depth = non_sky_depth
+            non_sky_max = min(torch.quantile(sampled_depth, 0.99), float(sky_depth_def))
+        output.depth, output.depth_conf = set_sky_regions_to_max_depth(
+            output.depth, output.depth_conf, non_sky_mask, max_depth=non_sky_max
+        )
+        return output
+
+    da3_core._handle_sky_regions = types.MethodType(_patched, da3_core)
+
+
 def _register_model_input_cast_hook(root_model, target_dtype):
     # Cast all Tensor inputs to the root model to target_dtype. DepthAnything3 wraps the net in .model
     def hook(module, inputs):
@@ -296,6 +332,7 @@ def get_model(model_name, load_half=False):
                 _register_model_input_cast_hook(model.model, torch.float16)
             if model_name == "da3nested-giant-large":
                 _patch_nested_alignment_fp16(model)
+                _patch_nested_sky_fp16(model)
         model.eval()
         # Debug: show where weights live and their dtypes to help diagnose overcommit/paging
         try:
