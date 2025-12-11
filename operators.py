@@ -94,6 +94,20 @@ def _summarize_model_dtypes(mod):
     return counts
 
 
+def _convert_norm_layers(model, dtype):
+    # Ensure normalization weights/bias match the requested dtype to avoid mixed-dtype layer_norm errors
+    norm_types = (
+        torch.nn.LayerNorm,
+        torch.nn.GroupNorm,
+        torch.nn.BatchNorm1d,
+        torch.nn.BatchNorm2d,
+        torch.nn.BatchNorm3d,
+    )
+    for m in model.modules():
+        if isinstance(m, norm_types):
+            m.to(dtype)
+
+
 def get_model(model_name, load_half=False):
     global model, current_model_name, current_model_load_half
     if model is None or current_model_name != model_name or current_model_load_half != load_half:
@@ -110,8 +124,9 @@ def get_model(model_name, load_half=False):
         else:
             raise FileNotFoundError(f"Model file {model_name} not found. Please download it first.")
         if load_half:
-            # Convert weights/buffers to fp16 to reduce VRAM; some layers may stay fp32 if required
+            # Convert weights/buffers to fp16 to reduce VRAM; also downcast norm layers to avoid mixed-dtype layer_norm errors
             model = model.half()
+            _convert_norm_layers(model, torch.float16)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model.to(device)
         model.eval()
@@ -483,6 +498,9 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.process_res_method = context.scene.da3_process_res_method
         self.use_half_precision = context.scene.da3_use_half_precision
         self.load_half_precision_model = getattr(context.scene, "da3_load_half_precision", False)
+        if self.load_half_precision_model:
+            # Ensure activations use half when model weights are half to avoid mixed-dtype ops
+            self.use_half_precision = True
         self.filter_edges = getattr(context.scene, "da3_filter_edges", True)
         self.min_confidence = getattr(context.scene, "da3_min_confidence", 0.5)
         self.output_debug_images = getattr(context.scene, "da3_output_debug_images", False)
