@@ -553,6 +553,7 @@ class DownloadModelOperator(bpy.types.Operator):
 
     thread = None
     progress = 0
+    old_progress = -1
     error_message = ""
     stop_event = None
 
@@ -570,6 +571,7 @@ class DownloadModelOperator(bpy.types.Operator):
 
         context.scene.da3_progress = 0
         self.progress = 0
+        self.old_progress = -1
         self.error_message = ""
         self.stop_event = threading.Event()
 
