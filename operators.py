@@ -708,11 +708,9 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.use_ray_pose = getattr(context.scene, "da3_use_ray_pose", False)
         self.process_res = context.scene.da3_process_res
         self.process_res_method = context.scene.da3_process_res_method
-        self.use_half_precision = context.scene.da3_use_half_precision
         self.load_half_precision_model = getattr(context.scene, "da3_load_half_precision", False)
-        if self.load_half_precision_model:
-            # Ensure activations use half when model weights are half to avoid mixed-dtype ops
-            self.use_half_precision = True
+        # Use half-precision activations only when fp16 weights are requested
+        self.use_half_precision = bool(self.load_half_precision_model)
         self.filter_edges = getattr(context.scene, "da3_filter_edges", True)
         self.min_confidence = getattr(context.scene, "da3_min_confidence", 0.5)
         self.output_debug_images = getattr(context.scene, "da3_output_debug_images", False)

@@ -166,11 +166,6 @@ def register_classes():
         description="Method for resizing images to the target resolution",
         default="upper_bound_resize"
     )
-    bpy.types.Scene.da3_use_half_precision = bpy.props.BoolProperty(
-        name="Use Half Precision",
-        description="Use 16-bit floats for reduced VRAM usage",
-        default=False,
-    )
     bpy.types.Scene.da3_load_half_precision = bpy.props.BoolProperty(
         name="Use FP16 Weights (experimental)",
         description="Load model weights/buffers in 16-bit to reduce VRAM; may affect stability/accuracy",
@@ -285,7 +280,6 @@ def unregister_classes():
     del bpy.types.Scene.da3_metric_mode
     del bpy.types.Scene.da3_process_res
     del bpy.types.Scene.da3_process_res_method
-    del bpy.types.Scene.da3_use_half_precision
     del bpy.types.Scene.da3_use_ray_pose
     del bpy.types.Scene.da3_batch_size
     del bpy.types.Scene.da3_batch_mode
