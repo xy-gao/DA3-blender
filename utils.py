@@ -56,7 +56,8 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
     import torch.cuda.amp as amp
 
     if use_half:
-        with amp.autocast():
+        # Ensure all inputs/activations run in fp16 to match fp16 weights when load_half_precision_model is set
+        with amp.autocast(dtype=torch.float16):
             prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
     else:
         prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)

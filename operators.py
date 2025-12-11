@@ -187,6 +187,7 @@ def get_model(model_name, load_half=False):
             _cast_model_params_and_buffers(model, torch.float16)
             _register_norm_input_cast_hooks(model)
             # Cast inputs into the underlying network to fp16 to avoid float inputs with half weights
+            _register_model_input_cast_hook(model, torch.float16)
             if hasattr(model, "model"):
                 _register_model_input_cast_hook(model.model, torch.float16)
         model.eval()
