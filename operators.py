@@ -108,6 +108,16 @@ def _convert_norm_layers(model, dtype):
             m.to(dtype)
 
 
+def _cast_model_params_and_buffers(model, dtype):
+    # Force-cast all float params/buffers to the target dtype to avoid hidden fp32 leftovers
+    for p in model.parameters():
+        if p.is_floating_point():
+            p.data = p.data.to(dtype)
+    for b in model.buffers():
+        if torch.is_floating_point(b):
+            b.data = b.data.to(dtype)
+
+
 def get_model(model_name, load_half=False):
     global model, current_model_name, current_model_load_half
     if model is None or current_model_name != model_name or current_model_load_half != load_half:
@@ -123,12 +133,13 @@ def get_model(model_name, load_half=False):
             model.load_state_dict(weight, strict=False)
         else:
             raise FileNotFoundError(f"Model file {model_name} not found. Please download it first.")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(device)
         if load_half:
             # Convert weights/buffers to fp16 to reduce VRAM; also downcast norm layers to avoid mixed-dtype layer_norm errors
             model = model.half()
             _convert_norm_layers(model, torch.float16)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model.to(device)
+            _cast_model_params_and_buffers(model, torch.float16)
         model.eval()
         # Debug: show where weights live and their dtypes to help diagnose overcommit/paging
         try:
