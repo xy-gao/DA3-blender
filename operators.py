@@ -50,6 +50,7 @@ _URLS = {
     "da3metric-large": "https://huggingface.co/depth-anything/DA3METRIC-LARGE/resolve/main/model.safetensors",
     "da3mono-large": "https://huggingface.co/depth-anything/DA3MONO-LARGE/resolve/main/model.safetensors",
     "da3nested-giant-large": "https://huggingface.co/depth-anything/DA3NESTED-GIANT-LARGE/resolve/main/model.safetensors",
+    "da3nested-giant-large-1.1": "https://huggingface.co/depth-anything/DA3NESTED-GIANT-LARGE-1.1/resolve/main/model.safetensors",
 
     "yolov8n-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-seg.pt",
     "yolov8s-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-seg.pt",
@@ -65,6 +66,7 @@ _URLS = {
     "yoloe-11m-seg-pf": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11m-seg-pf.pt",
     "yoloe-11l-seg-pf": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-11l-seg-pf.pt",
 }
+NESTED_MODEL_NAMES = ("da3nested-giant-large", "da3nested-giant-large-1.1")
 model = None
 current_model_name = None
 current_model_load_half = None
@@ -327,8 +329,8 @@ def _cast_model_params_and_buffers(model, dtype):
 def get_model(model_name, load_half=False):
     global model, current_model_name, current_model_load_half
     # Nested giant is sensitive to fp16 in dependency code; force fp32 to avoid dtype errors without modifying deps
-    if model_name == "da3nested-giant-large" and load_half:
-        print("Notice: attempting fp16 with runtime patch for da3nested-giant-large alignment.")
+    if model_name in NESTED_MODEL_NAMES and load_half:
+        print("Notice: attempting fp16 with runtime patch for nested giant alignment.")
     if model is None or current_model_name != model_name or current_model_load_half != load_half:
         from depth_anything_3.api import DepthAnything3
         if torch.cuda.is_available():
@@ -359,7 +361,7 @@ def get_model(model_name, load_half=False):
             _register_model_input_cast_hook(model, torch.float16)
             if hasattr(model, "model"):
                 _register_model_input_cast_hook(model.model, torch.float16)
-            if model_name == "da3nested-giant-large":
+            if model_name in NESTED_MODEL_NAMES:
                 _patch_nested_alignment_fp16(model)
                 _patch_nested_sky_fp16(model)
         model.eval()

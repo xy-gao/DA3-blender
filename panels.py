@@ -28,7 +28,7 @@ class DA3Panel(bpy.types.Panel):
         layout.prop(scene, "da3_load_half_precision", text="Use FP16 Weights (experimental)")
 
         # Metric model checkbox and download button/status
-        if scene.da3_model_name != "da3nested-giant-large":
+        if scene.da3_model_name not in {"da3nested-giant-large", "da3nested-giant-large-1.1"}:
             layout.prop(scene, "da3_use_metric", text="Use Metric")
             if scene.da3_use_metric:
                 # Metric combination mode

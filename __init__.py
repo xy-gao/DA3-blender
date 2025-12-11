@@ -132,6 +132,7 @@ def register_classes():
             ("da3metric-large", "DA3 Metric Large", "Metric depth model"),
             ('da3mono-large', 'DA3 Mono Large', 'Single image depth estimation'),
             ('da3nested-giant-large', 'DA3 Nested Giant Large', 'Nested depth estimation'),
+            ('da3nested-giant-large-1.1', 'DA3 Nested Giant Large 1.1', 'Nested depth estimation (v1.1 checkpoint)'),
         ],
         name="Model",
         description="Select DA3 model variant",
