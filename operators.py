@@ -221,15 +221,18 @@ def get_model(model_name, load_half=False):
         model_path = get_model_path(model_name)
         if os.path.exists(model_path):
             from safetensors.torch import load_file
-            weight = load_file(model_path)
+            # Keep weights on CPU during load to avoid fp32 GPU residency
+            weight = load_file(model_path, device="cpu")
+            if load_half:
+                weight = {k: (v.half() if v.is_floating_point() else v) for k, v in weight.items()}
+                model = model.half()  # set module params/buffers to half before loading
             model.load_state_dict(weight, strict=False)
         else:
             raise FileNotFoundError(f"Model file {model_name} not found. Please download it first.")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model.to(device)
         if load_half:
-            # Convert weights/buffers to fp16 to reduce VRAM; also downcast norm layers to avoid mixed-dtype layer_norm errors
-            model = model.half()
+            # Convert any stragglers to fp16 and register input-cast hooks
             _convert_norm_layers(model, torch.float16)
             _cast_model_params_and_buffers(model, torch.float16)
             _register_norm_input_cast_hooks(model)
