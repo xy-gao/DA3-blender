@@ -69,6 +69,13 @@ class DA3Panel(bpy.types.Panel):
         row = layout.row()
         row.operator("da3.unload_model")
 
+        layout.separator()
+        layout.label(text="DA3-Streaming")
+        layout.prop(scene, "da3_streaming_config", text="Config")
+        layout.prop(scene, "da3_streaming_output", text="Output Folder")
+        row = layout.row()
+        row.operator("da3.run_streaming", text="Run Streaming")
+
         # Progress bar
         if context.scene.da3_progress >= 0 and context.scene.da3_progress <= 100:
             layout.label(text=context.scene.da3_progress_stage)

@@ -7,6 +7,8 @@ from collections import Counter
 import numpy as np
 import time
 import datetime
+import subprocess
+import sys
 from .utils import (
     run_model,
     convert_prediction_to_dict,
@@ -75,6 +77,17 @@ CONFIG_NAME_MAP = {
     "da3-giant-1.1": "da3-giant",
     "da3nested-giant-large-1.1": "da3nested-giant-large",
 }
+
+ADDON_PATH = Path(__file__).parent
+STREAMING_DIR = ADDON_PATH / "da3_repo" / "da3_streaming"
+STREAMING_SCRIPT = STREAMING_DIR / "da3_streaming.py"
+STREAMING_CONFIGS = {
+    "base_config.yaml": STREAMING_DIR / "configs" / "base_config.yaml",
+    "kitti.yaml": STREAMING_DIR / "configs" / "kitti.yaml",
+    "tum.yaml": STREAMING_DIR / "configs" / "tum.yaml",
+}
+DEPS_PUBLIC_PATH = ADDON_PATH / "deps_public"
+DEPS_DA3_PATH = ADDON_PATH / "deps_da3"
 model = None
 current_model_name = None
 current_model_load_half = None
@@ -673,6 +686,107 @@ class DownloadModelOperator(bpy.types.Operator):
         # model_name = context.scene.da3_model_name
         # model_path = get_model_path(model_name)
         # return not os.path.exists(model_path)
+
+
+class RunStreamingOperator(bpy.types.Operator):
+    bl_idname = "da3.run_streaming"
+    bl_label = "Run DA3-Streaming"
+    bl_description = "Run the DA3-Streaming script on the input folder"
+    bl_options = {"REGISTER", "INTERNAL"}
+
+    process = None
+    timer = None
+    log = ""
+    error_message = ""
+
+    def invoke(self, context, event):
+        image_dir = context.scene.da3_input_folder
+        output_dir = context.scene.da3_streaming_output.strip()
+        config_key = context.scene.da3_streaming_config
+        config_path = STREAMING_CONFIGS.get(config_key)
+
+        if not image_dir or not os.path.isdir(image_dir):
+            self.report({'ERROR'}, "Please select a valid input folder for streaming.")
+            return {'CANCELLED'}
+        if not output_dir:
+            output_dir = os.path.join(image_dir, "da3_streaming_output")
+        os.makedirs(output_dir, exist_ok=True)
+
+        if not config_path or not config_path.exists():
+            self.report({'ERROR'}, f"Streaming config not found: {config_key}")
+            return {'CANCELLED'}
+        if not STREAMING_SCRIPT.exists():
+            self.report({'ERROR'}, "Streaming script not found. Update DA3 repo and submodules first.")
+            return {'CANCELLED'}
+
+        # Ensure the subprocess can see our bundled deps (deps_public/deps_da3)
+        env = os.environ.copy()
+        py_path_parts = []
+        existing = env.get("PYTHONPATH", "")
+        if existing:
+            py_path_parts.append(existing)
+        py_path_parts.insert(0, os.fspath(DEPS_DA3_PATH))
+        py_path_parts.insert(0, os.fspath(DEPS_PUBLIC_PATH))
+        env["PYTHONPATH"] = os.pathsep.join(py_path_parts)
+
+        cmd = [
+            sys.executable,
+            os.fspath(STREAMING_SCRIPT),
+            "--image_dir", os.fspath(image_dir),
+            "--config", os.fspath(config_path),
+            "--output_dir", os.fspath(output_dir),
+        ]
+
+        try:
+            self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to start streaming: {e}")
+            return {'CANCELLED'}
+
+        wm = context.window_manager
+        self.timer = wm.event_timer_add(0.5, window=context.window)
+        wm.modal_handler_add(self)
+        self.report({'INFO'}, "DA3-Streaming started...")
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type == 'TIMER':
+            if self.process and self.process.poll() is None:
+                # process still running; optionally read incremental output
+                return {'PASS_THROUGH'}
+
+            # Process finished; read remaining output
+            if self.process:
+                try:
+                    out, _ = self.process.communicate(timeout=0.1)
+                    if out:
+                        print(out)
+                        self.log += out
+                except Exception:
+                    pass
+
+            wm = context.window_manager
+            wm.event_timer_remove(self.timer)
+
+            if self.process and self.process.returncode != 0:
+                self.report({'ERROR'}, "DA3-Streaming failed; check console for logs.")
+                return {'CANCELLED'}
+
+            self.report({'INFO'}, "DA3-Streaming completed.")
+            return {'FINISHED'}
+
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            if self.process and self.process.poll() is None:
+                try:
+                    self.process.terminate()
+                except Exception:
+                    pass
+            if self.timer:
+                context.window_manager.event_timer_remove(self.timer)
+            self.report({'WARNING'}, "DA3-Streaming cancelled.")
+            return {'CANCELLED'}
+
+        return {'PASS_THROUGH'}
 
 
 class UnloadModelOperator(bpy.types.Operator):

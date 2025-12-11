@@ -19,6 +19,7 @@ deps_path_da3 = add_on_path / 'deps_da3'
 sys.path.insert(0, os.fspath(deps_path))
 sys.path.insert(0, os.fspath(deps_path_da3))
 sys.path.insert(0, os.fspath(DA3_DIR))
+OPENCV_PINNED = "opencv-python==4.11.0.86"
 
 
 class Dependencies:
@@ -87,6 +88,8 @@ class Dependencies:
             ]
             print(f'Installing: {cmd}')
             subprocess.check_call(cmd)
+            # Force the pinned OpenCV to avoid newer wheels pulling numpy>=2
+            Dependencies._ensure_pinned_opencv()
         except subprocess.CalledProcessError as e:
             print(f'Caught CalledProcessError while trying to install dependencies')
             print(f'  Exception: {e}')
@@ -184,6 +187,7 @@ class Dependencies:
             ]
             print(f'Installing streaming deps: {cmd}')
             subprocess.check_call(cmd)
+            Dependencies._ensure_pinned_opencv()
             return True
         except subprocess.CalledProcessError as e:
             print('Streaming deps install failed, retrying with faiss-cpu fallback and without pypose...')
@@ -217,6 +221,7 @@ class Dependencies:
                 for fc in fallback_cmds:
                     print(f'Installing streaming fallback chunk: {fc}')
                     subprocess.check_call(fc)
+                Dependencies._ensure_pinned_opencv()
                 return True
             except subprocess.CalledProcessError as e2:
                 print(f'Fallback streaming deps install failed: {e2}')
@@ -224,6 +229,25 @@ class Dependencies:
         except Exception as e:
             print(f'Caught Exception while installing streaming deps: {e}')
             return False
+
+    @staticmethod
+    def _ensure_pinned_opencv():
+        """Force reinstall of the pinned OpenCV version to avoid numpy>=2 pulls from newer wheels."""
+        try:
+            cmd = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--force-reinstall",
+                OPENCV_PINNED,
+                "--target",
+                os.fspath(deps_path),
+            ]
+            print(f'Ensuring pinned OpenCV: {cmd}')
+            subprocess.check_call(cmd)
+        except subprocess.CalledProcessError as e:
+            print(f'Warning: failed to enforce pinned OpenCV ({OPENCV_PINNED}): {e}')
 
     @staticmethod
     def _update_submodules():

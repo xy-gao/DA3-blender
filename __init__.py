@@ -165,8 +165,25 @@ def register_classes():
     bpy.utils.register_class(operators.DownloadModelOperator)
     bpy.utils.register_class(operators.UnloadModelOperator)
     bpy.utils.register_class(operators.GeneratePointCloudOperator)
+    bpy.utils.register_class(operators.RunStreamingOperator)
     bpy.utils.register_class(panels.DA3Panel)
     bpy.types.Scene.da3_input_folder = bpy.props.StringProperty(subtype='DIR_PATH')
+    bpy.types.Scene.da3_streaming_output = bpy.props.StringProperty(
+        name="Streaming Output",
+        description="Folder to store DA3-Streaming results",
+        subtype='DIR_PATH',
+        default=""
+    )
+    bpy.types.Scene.da3_streaming_config = bpy.props.EnumProperty(
+        items=[
+            ('base_config.yaml', 'Base', 'Default streaming config'),
+            ('kitti.yaml', 'KITTI', 'KITTI streaming config'),
+            ('tum.yaml', 'TUM', 'TUM RGB-D streaming config'),
+        ],
+        name="Streaming Config",
+        description="Select DA3-Streaming config file",
+        default='base_config.yaml'
+    )
     bpy.types.Scene.da3_model_name = bpy.props.EnumProperty(
         items=[
             ('da3-small', 'DA3 Small', 'Small model for faster inference'),
@@ -320,8 +337,11 @@ def unregister_classes():
     bpy.utils.unregister_class(operators.DownloadModelOperator)
     bpy.utils.unregister_class(operators.UnloadModelOperator)
     bpy.utils.unregister_class(operators.GeneratePointCloudOperator)
+    bpy.utils.unregister_class(operators.RunStreamingOperator)
     bpy.utils.unregister_class(panels.DA3Panel)
     del bpy.types.Scene.da3_input_folder
+    del bpy.types.Scene.da3_streaming_output
+    del bpy.types.Scene.da3_streaming_config
     del bpy.types.Scene.da3_model_name
     del bpy.types.Scene.da3_use_metric
     del bpy.types.Scene.da3_metric_mode
