@@ -313,7 +313,7 @@ class DownloadModelOperator(bpy.types.Operator):
 
         wm = context.window_manager
         # wm.progress_begin(0, 100)
-        self.timer = wm.event_timer_add(0.1, window=context.window)
+        self.timer = wm.event_timer_add(0.3, window=context.window)
         wm.modal_handler_add(self)
 
         return {'RUNNING_MODAL'}
@@ -351,6 +351,13 @@ class DownloadModelOperator(bpy.types.Operator):
         if event.type == 'TIMER':
             # context.window_manager.progress_update(self.progress)
             context.scene.da3_progress = self.progress
+            if self.progress != self.old_progress:
+                self.old_progress = self.progress
+                # Force UI redraw
+                for area in context.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        area.tag_redraw()
+
             if self.stop_event.is_set() and not self.thread.is_alive():
                 wm = context.window_manager
                 wm.event_timer_remove(self.timer)
@@ -617,7 +624,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
 
             # 1) run base model
-            self.update_progress_timer(LoadModelTime, f"Loading {self.base_model_name} model...")
+            self.update_progress_timer(0, f"Loading {self.base_model_name} model...")
             base_model = get_model(self.base_model_name)
             self.update_progress_timer(LoadModelTime, "Loaded base model")
             print("Running base model inference...")
