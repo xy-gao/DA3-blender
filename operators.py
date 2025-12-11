@@ -82,6 +82,7 @@ ADDON_PATH = Path(__file__).parent
 STREAMING_DIR = ADDON_PATH / "da3_repo" / "da3_streaming"
 STREAMING_SCRIPT = STREAMING_DIR / "da3_streaming.py"
 STREAMING_CONFIGS = {
+    "base_config_low_vram.yaml": STREAMING_DIR / "configs" / "base_config_low_vram.yaml",
     "base_config.yaml": STREAMING_DIR / "configs" / "base_config.yaml",
     "kitti.yaml": STREAMING_DIR / "configs" / "kitti.yaml",
     "tum.yaml": STREAMING_DIR / "configs" / "tum.yaml",

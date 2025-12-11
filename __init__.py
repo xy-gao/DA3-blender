@@ -176,6 +176,7 @@ def register_classes():
     )
     bpy.types.Scene.da3_streaming_config = bpy.props.EnumProperty(
         items=[
+            ('base_config_low_vram.yaml', 'Low VRAM', 'Low VRAM streaming config'),
             ('base_config.yaml', 'Base', 'Default streaming config'),
             ('kitti.yaml', 'KITTI', 'KITTI streaming config'),
             ('tum.yaml', 'TUM', 'TUM RGB-D streaming config'),
