@@ -171,6 +171,11 @@ def register_classes():
         description="Use 16-bit floats for reduced VRAM usage",
         default=False,
     )
+    bpy.types.Scene.da3_load_half_precision = bpy.props.BoolProperty(
+        name="Load Weights in Half",
+        description="Load model weights/buffers in 16-bit to reduce VRAM (experimental)",
+        default=False,
+    )
     bpy.types.Scene.da3_use_ray_pose = bpy.props.BoolProperty(
         name="Use Ray-based Pose",
         description="Use ray-based camera pose estimation instead of the camera decoder (slower but potentially more accurate)",

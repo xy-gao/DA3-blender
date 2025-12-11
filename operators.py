@@ -66,6 +66,7 @@ _URLS = {
 }
 model = None
 current_model_name = None
+current_model_load_half = None
 
 def get_model_path(model_name, context=None):
     return get_any_model_path(f'{model_name}.safetensors', context)
@@ -93,9 +94,9 @@ def _summarize_model_dtypes(mod):
     return counts
 
 
-def get_model(model_name):
-    global model, current_model_name
-    if model is None or current_model_name != model_name:
+def get_model(model_name, load_half=False):
+    global model, current_model_name, current_model_load_half
+    if model is None or current_model_name != model_name or current_model_load_half != load_half:
         from depth_anything_3.api import DepthAnything3
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
@@ -108,6 +109,9 @@ def get_model(model_name):
             model.load_state_dict(weight, strict=False)
         else:
             raise FileNotFoundError(f"Model file {model_name} not found. Please download it first.")
+        if load_half:
+            # Convert weights/buffers to fp16 to reduce VRAM; some layers may stay fp32 if required
+            model = model.half()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model.to(device)
         model.eval()
@@ -122,17 +126,19 @@ def get_model(model_name):
         except StopIteration:
             print("Model has no parameters to summarize.")
         current_model_name = model_name
+        current_model_load_half = load_half
         display_VRAM_usage(f"after loading {model_name}", include_peak=True)
     return model
 
 def unload_current_model():
-    global model, current_model_name
+    global model, current_model_name, current_model_load_half
     if model is not None:
         display_VRAM_usage("before unload")
         # Drop references so PyTorch can free memory
         del model
         model = None
         current_model_name = None
+        current_model_load_half = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             display_VRAM_usage("after unload")
@@ -476,6 +482,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.process_res = context.scene.da3_process_res
         self.process_res_method = context.scene.da3_process_res_method
         self.use_half_precision = context.scene.da3_use_half_precision
+        self.load_half_precision_model = getattr(context.scene, "da3_load_half_precision", False)
         self.filter_edges = getattr(context.scene, "da3_filter_edges", True)
         self.min_confidence = getattr(context.scene, "da3_min_confidence", 0.5)
         self.output_debug_images = getattr(context.scene, "da3_output_debug_images", False)
@@ -625,7 +632,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
 
             # 1) run base model
             self.update_progress_timer(0, f"Loading {self.base_model_name} model...")
-            base_model = get_model(self.base_model_name)
+            base_model = get_model(self.base_model_name, load_half=self.load_half_precision_model)
             self.update_progress_timer(LoadModelTime, "Loaded base model")
             print("Running base model inference...")
             
@@ -746,7 +753,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                     base_model = None
                     unload_current_model()
 
-                    metric_model = get_model("da3metric-large")
+                    metric_model = get_model("da3metric-large", load_half=self.load_half_precision_model)
                     self.update_progress_timer(BaseTimeEstimate + MetricLoadModelTime, "Loaded metric model")
                     print("Running metric model inference...")
                     
