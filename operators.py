@@ -259,9 +259,17 @@ def _patch_nested_sky_fp16(model):
             else:
                 sampled_depth = non_sky_depth
             non_sky_max = min(torch.quantile(sampled_depth, 0.99), float(sky_depth_def))
+        # Write back using dtype of depth to avoid dtype mismatch
+        depth_dtype = output.depth.dtype
+        conf_dtype = output.depth_conf.dtype
         output.depth, output.depth_conf = set_sky_regions_to_max_depth(
-            output.depth, output.depth_conf, non_sky_mask, max_depth=non_sky_max
+            output.depth,
+            output.depth_conf,
+            non_sky_mask,
+            max_depth=torch.tensor(non_sky_max, device=output.depth.device, dtype=depth_dtype),
         )
+        # Ensure depth_conf dtype preserved
+        output.depth_conf = output.depth_conf.to(conf_dtype)
         return output
 
     da3_core._handle_sky_regions = types.MethodType(_patched, da3_core)
