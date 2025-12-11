@@ -85,6 +85,27 @@ def display_VRAM_usage(stage: str, include_peak=False):
         print(msg)
 
 
+def unload_if_overcommitted(reason: str = ""):
+    """Unload the cached model if current VRAM usage exceeds the device's total VRAM."""
+    if not torch.cuda.is_available():
+        return False
+    free, total = torch.cuda.mem_get_info()
+    allocated = torch.cuda.memory_allocated()
+    reserved = torch.cuda.memory_reserved()
+    if allocated > total:
+        total_mb = total / 1024**2
+        alloc_mb = allocated / 1024**2
+        reserv_mb = reserved / 1024**2
+        print(
+            f"VRAM overcommitted (allocated: {alloc_mb:.1f} MB, reserved: {reserv_mb:.1f} MB, total: {total_mb:.1f} MB). "
+            f"Unloading model. Reason: {reason}"
+        )
+        unload_current_model()
+        torch.cuda.empty_cache()
+        return True
+    return False
+
+
 def _summarize_model_dtypes(mod):
     # Lightweight dtype/device counter for debugging footprint
     counts = Counter()
@@ -965,6 +986,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
 
             # If NOT using metric, we are done!
             if not self.use_metric:
+                unload_if_overcommitted("post-base-inference")
                 self.result_queue.put({"type": "DONE"})
                 return
 
@@ -1143,6 +1165,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 self.handle_batch_result(batch_prediction, batch_indices, batch_number, folder_name, all_segmentation_data, segmentation_class_names)
             
             self.result_queue.put({"type": "DONE"})
+            unload_if_overcommitted("post-metric-inference")
 
         except Exception as e:
             import traceback
