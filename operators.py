@@ -23,6 +23,7 @@ import urllib.request
 import threading
 import queue
 from . import DEFAULT_MODELS_DIR, get_configured_model_folder, get_prefs
+import types
 
 
 def get_any_model_path(model_filename, context=None):
@@ -182,6 +183,54 @@ def _register_linear_input_cast_hooks(model):
             m.register_forward_pre_hook(make_hook(m))
 
 
+def _patch_nested_alignment_fp16(model):
+    """
+    Monkeypatch nested giant depth alignment to avoid fp16 quantile crash without modifying deps on disk.
+    Converts sampled confidence to float before torch.quantile.
+    """
+    try:
+        from depth_anything_3.utils.alignment import (
+            compute_sky_mask,
+            compute_alignment_mask,
+            least_squares_scale_scalar,
+            sample_tensor_for_quantile,
+        )
+    except Exception as e:
+        print(f"Warning: could not import alignment utils for nested patch: {e}")
+        return
+
+    da3_core = getattr(model, "model", None)
+    if da3_core is None:
+        return
+
+    # Save original for fallback
+    orig_fn = getattr(da3_core, "_apply_depth_alignment", None)
+    if orig_fn is None:
+        return
+
+    def _patched(self, output, metric_output):
+        # Run alignment in fp32 without autocast to avoid scalar type issues
+        with torch.cuda.amp.autocast(enabled=False):
+            non_sky_mask = compute_sky_mask(metric_output.sky.float(), threshold=0.3)
+            assert non_sky_mask.sum() > 10, "Insufficient non-sky pixels for alignment"
+            depth_conf_ns = output.depth_conf.float()[non_sky_mask]
+            depth_conf_sampled = sample_tensor_for_quantile(depth_conf_ns, max_samples=100000)
+            median_conf = torch.quantile(depth_conf_sampled, 0.5)
+            align_mask = compute_alignment_mask(
+                output.depth_conf.float(), non_sky_mask, output.depth.float(), metric_output.depth.float(), median_conf
+            )
+            valid_depth = output.depth.float()[align_mask]
+            valid_metric_depth = metric_output.depth.float()[align_mask]
+            scale_factor = least_squares_scale_scalar(valid_metric_depth, valid_depth)
+        output.depth *= scale_factor
+        output.extrinsics[:, :, :3, 3] *= scale_factor
+        output.is_metric = 1
+        output.scale_factor = scale_factor.item()
+        return output
+
+    da3_core._apply_depth_alignment = types.MethodType(_patched, da3_core)
+
+
 def _register_model_input_cast_hook(root_model, target_dtype):
     # Cast all Tensor inputs to the root model to target_dtype. DepthAnything3 wraps the net in .model
     def hook(module, inputs):
@@ -212,6 +261,9 @@ def _cast_model_params_and_buffers(model, dtype):
 
 def get_model(model_name, load_half=False):
     global model, current_model_name, current_model_load_half
+    # Nested giant is sensitive to fp16 in dependency code; force fp32 to avoid dtype errors without modifying deps
+    if model_name == "da3nested-giant-large" and load_half:
+        print("Notice: attempting fp16 with runtime patch for da3nested-giant-large alignment.")
     if model is None or current_model_name != model_name or current_model_load_half != load_half:
         from depth_anything_3.api import DepthAnything3
         if torch.cuda.is_available():
@@ -242,6 +294,8 @@ def get_model(model_name, load_half=False):
             _register_model_input_cast_hook(model, torch.float16)
             if hasattr(model, "model"):
                 _register_model_input_cast_hook(model.model, torch.float16)
+            if model_name == "da3nested-giant-large":
+                _patch_nested_alignment_fp16(model)
         model.eval()
         # Debug: show where weights live and their dtypes to help diagnose overcommit/paging
         try:
