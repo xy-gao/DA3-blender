@@ -1,5 +1,6 @@
 import os
 import pkg_resources
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,11 +34,33 @@ class Dependencies:
         # Create folder into which pip will install dependencies
         if not os.path.exists(DA3_DIR):
             try:
-                subprocess.check_call(['git', 'clone', 'https://github.com/ByteDance-Seed/Depth-Anything-3.git', DA3_DIR])
+                subprocess.check_call([
+                    'git',
+                    'clone',
+                    '--recursive',
+                    'https://github.com/ByteDance-Seed/Depth-Anything-3.git',
+                    os.fspath(DA3_DIR),
+                ])
             except subprocess.CalledProcessError as e:
                 print(f'Caught Exception while trying to git clone da3')
                 print(f'  Exception: {e}')
                 return False
+
+        # Ensure submodules are present (covers previous non-recursive clones)
+        try:
+            subprocess.check_call([
+                'git',
+                '-C',
+                os.fspath(DA3_DIR),
+                'submodule',
+                'update',
+                '--init',
+                '--recursive',
+            ])
+        except subprocess.CalledProcessError as e:
+            print('Caught Exception while trying to update DA3 submodules')
+            print(f'  Exception: {e}')
+            return False
         
         try:
             deps_path.mkdir(exist_ok=True)
@@ -103,6 +126,60 @@ class Dependencies:
             print(f'  Requirements: {DA3_DIR}')
             return False
         return Dependencies.check(force=True)
+
+    @staticmethod
+    def update_da3_repo():
+        """Pull the latest DA3 repo (with submodules) and reinstall into deps_da3."""
+        try:
+            if not DA3_DIR.exists() or not (DA3_DIR / ".git").exists():
+                print('DA3 repo missing, cloning recursively...')
+                subprocess.check_call([
+                    'git',
+                    'clone',
+                    '--recursive',
+                    'https://github.com/ByteDance-Seed/Depth-Anything-3.git',
+                    os.fspath(DA3_DIR),
+                ])
+            else:
+                subprocess.check_call(['git', '-C', os.fspath(DA3_DIR), 'pull', '--ff-only'])
+                subprocess.check_call([
+                    'git',
+                    '-C',
+                    os.fspath(DA3_DIR),
+                    'submodule',
+                    'update',
+                    '--init',
+                    '--recursive',
+                ])
+
+            # Reinstall DA3 into deps_da3 to keep it in sync with the working tree
+            if deps_path_da3.exists():
+                shutil.rmtree(deps_path_da3)
+            deps_path_da3.mkdir(exist_ok=True)
+
+            cmd = [
+                sys.executable,
+                '-m',
+                'pip',
+                'install',
+                '--no-deps',
+                os.fspath(DA3_DIR),
+                '--target',
+                os.fspath(deps_path_da3),
+            ]
+            print(f'Installing updated DA3 into deps_da3: {cmd}')
+            subprocess.check_call(cmd)
+
+            Dependencies._checked = None
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f'Caught CalledProcessError while updating DA3 repo')
+            print(f'  Exception: {e}')
+            return False
+        except Exception as e:
+            print(f'Caught Exception while updating DA3 repo')
+            print(f'  Exception: {e}')
+            return False
 
     @staticmethod
     def check(*, force=False):

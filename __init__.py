@@ -86,6 +86,25 @@ class DA3InstallDepsOperator(bpy.types.Operator):
             self.report({'ERROR'}, f"Failed to install dependencies: {e}")
         return {'FINISHED'}
 
+
+class DA3UpdateDA3RepoOperator(bpy.types.Operator):
+    bl_idname = "da3.update_da3_repo"
+    bl_label = "Update Depth Anything 3"
+    bl_description = "Pull latest Depth Anything 3 (recursive) and refresh deps_da3"
+    bl_options = {"REGISTER", "INTERNAL"}
+
+    def execute(self, context):
+        try:
+            ok = Dependencies.update_da3_repo()
+            if ok:
+                self.report({'INFO'}, "Depth Anything 3 updated (git pull --recursive) and deps_da3 refreshed.")
+                return {'FINISHED'}
+            self.report({'ERROR'}, "Failed to update Depth Anything 3. Check system console.")
+            return {'CANCELLED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Failed to update Depth Anything 3: {e}")
+            return {'CANCELLED'}
+
 class DA3AddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
 
@@ -106,6 +125,9 @@ class DA3AddonPreferences(bpy.types.AddonPreferences):
         
         row = box.row()
         row.operator("da3.move_models", text="Move Existing Models to Custom Folder")
+
+        row = box.row()
+        row.operator(DA3UpdateDA3RepoOperator.bl_idname, text="Update Depth Anything 3 (recursive)")
         
         layout.separator()
 
@@ -312,6 +334,7 @@ class DA3InstallDepsPanel(bpy.types.Panel):
 classes = [
     DA3AddonPreferences,
     DA3InstallDepsOperator,
+    DA3UpdateDA3RepoOperator,
     MoveModelsOperator,
 ]
 
