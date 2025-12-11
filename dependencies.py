@@ -163,6 +163,69 @@ class Dependencies:
             return False
 
     @staticmethod
+    def install_streaming_deps():
+        """Install DA3-Streaming extra requirements into deps_public with fallbacks."""
+        streaming_reqs = DA3_DIR / 'da3_streaming' / 'requirements.txt'
+        if not streaming_reqs.exists():
+            print(f"Streaming requirements not found: {streaming_reqs}")
+            return False
+
+        try:
+            # Primary attempt: full requirements
+            cmd = [
+                sys.executable,
+                '-m',
+                'pip',
+                'install',
+                '-r',
+                os.fspath(streaming_reqs),
+                '--target',
+                os.fspath(deps_path),
+            ]
+            print(f'Installing streaming deps: {cmd}')
+            subprocess.check_call(cmd)
+            return True
+        except subprocess.CalledProcessError as e:
+            print('Streaming deps install failed, retrying with faiss-cpu fallback and without pypose...')
+            try:
+                # Fallback: install without faiss-gpu/pypose, add faiss-cpu
+                # Remove or override problematic packages by installing the desired ones explicitly
+                fallback_cmds = [
+                    [
+                        sys.executable,
+                        '-m',
+                        'pip',
+                        'install',
+                        'faiss-cpu',
+                        '--target',
+                        os.fspath(deps_path),
+                    ],
+                    [
+                        sys.executable,
+                        '-m',
+                        'pip',
+                        'install',
+                        'pandas',
+                        'prettytable',
+                        'einops',
+                        'safetensors',
+                        'numba',
+                        '--target',
+                        os.fspath(deps_path),
+                    ],
+                ]
+                for fc in fallback_cmds:
+                    print(f'Installing streaming fallback chunk: {fc}')
+                    subprocess.check_call(fc)
+                return True
+            except subprocess.CalledProcessError as e2:
+                print(f'Fallback streaming deps install failed: {e2}')
+                return False
+        except Exception as e:
+            print(f'Caught Exception while installing streaming deps: {e}')
+            return False
+
+    @staticmethod
     def _update_submodules():
         """Update all submodules including nested .gitmodules under da3_streaming."""
         try:
