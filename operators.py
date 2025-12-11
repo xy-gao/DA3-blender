@@ -163,6 +163,25 @@ def _register_conv_input_cast_hooks(model):
             m.register_forward_pre_hook(make_hook(m))
 
 
+def _register_linear_input_cast_hooks(model):
+    # Cast Linear inputs to the module's weight dtype to avoid matmul dtype mismatches
+    def make_hook(mod):
+        def hook(module, inputs):
+            if not inputs:
+                return inputs
+            x = inputs[0]
+            if isinstance(x, torch.Tensor) and module.weight is not None:
+                target_dtype = module.weight.dtype
+                if x.dtype != target_dtype:
+                    return (x.to(target_dtype),) + inputs[1:]
+            return inputs
+        return hook
+
+    for m in model.modules():
+        if isinstance(m, torch.nn.Linear):
+            m.register_forward_pre_hook(make_hook(m))
+
+
 def _register_model_input_cast_hook(root_model, target_dtype):
     # Cast all Tensor inputs to the root model to target_dtype. DepthAnything3 wraps the net in .model
     def hook(module, inputs):
@@ -215,6 +234,7 @@ def get_model(model_name, load_half=False):
             _cast_model_params_and_buffers(model, torch.float16)
             _register_norm_input_cast_hooks(model)
             _register_conv_input_cast_hooks(model)
+            _register_linear_input_cast_hooks(model)
             # Cast inputs into the underlying network to fp16 to avoid float inputs with half weights
             _register_model_input_cast_hook(model, torch.float16)
             if hasattr(model, "model"):
