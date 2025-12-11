@@ -108,6 +108,51 @@ def _convert_norm_layers(model, dtype):
             m.to(dtype)
 
 
+def _register_norm_input_cast_hooks(model):
+    # Cast norm inputs to the module's weight dtype to avoid runtime dtype mismatches
+    norm_types = (
+        torch.nn.LayerNorm,
+        torch.nn.GroupNorm,
+        torch.nn.BatchNorm1d,
+        torch.nn.BatchNorm2d,
+        torch.nn.BatchNorm3d,
+    )
+
+    def make_hook(mod):
+        def hook(module, inputs):
+            if not inputs:
+                return inputs
+            x = inputs[0]
+            if isinstance(x, torch.Tensor) and module.weight is not None:
+                target_dtype = module.weight.dtype
+                if x.dtype != target_dtype:
+                    return (x.to(target_dtype),) + inputs[1:]
+            return inputs
+        return hook
+
+    for m in model.modules():
+        if isinstance(m, norm_types):
+            m.register_forward_pre_hook(make_hook(m))
+
+
+def _register_model_input_cast_hook(root_model, target_dtype):
+    # Cast all Tensor inputs to the root model to target_dtype. DepthAnything3 wraps the net in .model
+    def hook(module, inputs):
+        casted = []
+        for inp in inputs:
+            if isinstance(inp, torch.Tensor) and inp.dtype != target_dtype:
+                casted.append(inp.to(target_dtype))
+            elif isinstance(inp, (list, tuple)):
+                casted.append(type(inp)(
+                    x.to(target_dtype) if isinstance(x, torch.Tensor) and x.dtype != target_dtype else x
+                    for x in inp
+                ))
+            else:
+                casted.append(inp)
+        return tuple(casted)
+    root_model.register_forward_pre_hook(hook)
+
+
 def _cast_model_params_and_buffers(model, dtype):
     # Force-cast all float params/buffers to the target dtype to avoid hidden fp32 leftovers
     for p in model.parameters():
@@ -140,6 +185,10 @@ def get_model(model_name, load_half=False):
             model = model.half()
             _convert_norm_layers(model, torch.float16)
             _cast_model_params_and_buffers(model, torch.float16)
+            _register_norm_input_cast_hooks(model)
+            # Cast inputs into the underlying network to fp16 to avoid float inputs with half weights
+            if hasattr(model, "model"):
+                _register_model_input_cast_hook(model.model, torch.float16)
         model.eval()
         # Debug: show where weights live and their dtypes to help diagnose overcommit/paging
         try:
