@@ -975,7 +975,7 @@ Model:
     tol: 1e-9
 
   Pointcloud_Save:
-    sample_ratio: 0.015
+        sample_ratio: 1.0
     conf_threshold_coef: 0.75
 
 Loop:
