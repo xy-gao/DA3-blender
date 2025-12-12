@@ -1,10 +1,31 @@
 import os
+import sys
 from pathlib import Path
 import yaml
 
-from da3_repo.da3_streaming.da3_streaming import DA3_Streaming
-from da3_repo.da3_streaming.loop_utils.config_utils import load_config
-from da3_repo.da3_streaming.loop_utils.sim3utils import merge_ply_files, warmup_numba
+ADDON_ROOT = Path(__file__).parent
+
+# Ensure local DA3 repo (and installed deps) are on sys.path so da3_streaming can be imported
+for p in (
+    ADDON_ROOT / "deps_da3",
+    ADDON_ROOT / "deps_public",
+    ADDON_ROOT / "da3_repo",
+    ADDON_ROOT / "da3_repo" / "da3_streaming",
+    ADDON_ROOT / "da3_repo" / "da3_streaming" / "loop_utils",
+):
+    p_str = os.fspath(p)
+    if p.exists() and p_str not in sys.path:
+        sys.path.insert(0, p_str)
+
+# Dependencies.py already injects deps_public/deps_da3/DA3_DIR into sys.path on addon import.
+# We import the streaming modules directly from the vendored repo folder.
+import importlib
+
+da3_streaming_mod = importlib.import_module("da3_streaming")
+DA3_Streaming = da3_streaming_mod.DA3_Streaming
+load_config = importlib.import_module("config_utils").load_config
+merge_ply_files = importlib.import_module("sim3utils").merge_ply_files
+warmup_numba = importlib.import_module("sim3utils").warmup_numba
 
 
 def _load_base_config(base_cfg_path: Path) -> dict:
