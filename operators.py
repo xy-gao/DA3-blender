@@ -9,6 +9,7 @@ import time
 import datetime
 import subprocess
 import sys
+import tempfile
 from .utils import (
     run_model,
     convert_prediction_to_dict,
@@ -16,6 +17,7 @@ from .utils import (
     combine_base_with_metric_depth,
     import_point_cloud,
     import_mesh_from_depth,
+    create_point_cloud_object,
     create_cameras,
     align_batches,
     align_single_batch,
@@ -931,6 +933,165 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             "min_confidence": self.min_confidence
         })
 
+    def _write_streaming_config(self, model_path, chunk_size, overlap, loop_chunk_size, output_dir):
+        # Build a minimal YAML config string using current UI settings
+        weights_cfg = model_path.replace('\\', '/')
+        config_json = os.path.join(os.path.dirname(model_path), "config.json").replace('\\', '/')
+        salad_path = (STREAMING_DIR / "weights" / "dino_salad.ckpt").as_posix()
+
+        yaml_str = f"""Weights:
+  DA3: '{weights_cfg}'
+  DA3_CONFIG: '{config_json}'
+  SALAD: '{salad_path}'
+
+Model:
+  chunk_size: {chunk_size}
+  overlap: {overlap}
+  loop_chunk_size: {loop_chunk_size} # imgs of loop chunk = 2 * loop_chunk_size
+  loop_enable: True
+  useDBoW: False
+  delete_temp_files: True
+  align_lib: 'torch'
+  align_method: 'sim3'
+  scale_compute_method: 'auto'
+  align_type: 'dense'
+
+  ref_view_strategy: 'saddle_balanced'
+  ref_view_strategy_loop: 'saddle_balanced'
+  depth_threshold: 15.0
+
+  save_depth_conf_result: True
+  save_debug_info: False
+
+  Sparse_Align:
+    keypoint_select: 'orb'
+    keypoint_num: 5000
+
+  IRLS:
+    delta: 0.1
+    max_iters: 5
+    tol: 1e-9
+
+  Pointcloud_Save:
+    sample_ratio: 0.015
+    conf_threshold_coef: 0.75
+
+Loop:
+  SALAD:
+    image_size: [336, 336]
+    batch_size: 32
+    similarity_threshold: 0.85
+    top_k: 5
+    use_nms: True
+    nms_threshold: 25
+
+  SIM3_Optimizer:
+    lang_version: 'cpp'
+    max_iterations: 30
+    lambda_init: 1e-6
+"""
+        fd, cfg_path = tempfile.mkstemp(prefix="da3_streaming_", suffix=".yaml", dir=output_dir)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(yaml_str)
+        return cfg_path
+
+    def _run_streaming_pipeline(self, context):
+        folder_name = os.path.basename(os.path.normpath(self.input_folder))
+        output_dir = getattr(context.scene, "da3_streaming_output", "") or os.path.join(self.input_folder, "da3_streaming_output")
+        os.makedirs(output_dir, exist_ok=True)
+
+        model_path = get_model_path(self.base_model_name, context)
+        if not os.path.exists(model_path):
+            self.result_queue.put({"type": "ERROR", "message": f"Streaming model not found: {model_path}"})
+            return
+
+        chunk_size = max(1, int(self.batch_size))
+        overlap = max(1, chunk_size // 2)
+        loop_chunk_size = overlap
+
+        cfg_path = self._write_streaming_config(model_path, chunk_size, overlap, loop_chunk_size, output_dir)
+
+        env = os.environ.copy()
+        py_path_parts = []
+        existing = env.get("PYTHONPATH", "")
+        if existing:
+            py_path_parts.append(existing)
+        py_path_parts.insert(0, os.fspath(DEPS_DA3_PATH))
+        py_path_parts.insert(0, os.fspath(DEPS_PUBLIC_PATH))
+        env["PYTHONPATH"] = os.pathsep.join(py_path_parts)
+
+        cmd = [
+            sys.executable,
+            os.fspath(STREAMING_SCRIPT),
+            "--image_dir", os.fspath(self.input_folder),
+            "--config", os.fspath(cfg_path),
+            "--output_dir", os.fspath(output_dir),
+        ]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=os.fspath(STREAMING_DIR),
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+            if proc.stdout:
+                print(proc.stdout)
+            if proc.stderr:
+                print(proc.stderr)
+            if proc.returncode != 0:
+                self.result_queue.put({"type": "ERROR", "message": f"DA3-Streaming failed (code {proc.returncode})."})
+                return
+        except Exception as e:
+            self.result_queue.put({"type": "ERROR", "message": f"Failed to run DA3-Streaming: {e}"})
+            return
+
+        combined_pcd = os.path.join(output_dir, "pcd", "combined_pcd.ply")
+        if not os.path.exists(combined_pcd):
+            self.result_queue.put({"type": "ERROR", "message": "Streaming completed but combined_pcd.ply not found."})
+            return
+
+        self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
+        self.result_queue.put({"type": "STREAMING_PLY", "path": combined_pcd, "folder_name": folder_name})
+        self.result_queue.put({"type": "DONE"})
+
+    def _import_streaming_ply(self, context, msg):
+        try:
+            import numpy as _np
+            from plyfile import PlyData
+
+            folder_name = msg["folder_name"]
+            ply_path = msg["path"]
+
+            target_col = self.parent_col
+            if not target_col:
+                target_col = bpy.data.collections.new(folder_name)
+                context.scene.collection.children.link(target_col)
+
+            plydata = PlyData.read(ply_path)
+            vertices = plydata["vertex"]
+            pts = _np.stack([vertices["x"], vertices["y"], vertices["z"]], axis=1).astype(_np.float32)
+            # Match the same coordinate conversion used in import_point_cloud
+            pts[:, [0, 1, 2]] = pts[:, [0, 2, 1]]
+            pts[:, 2] = -pts[:, 2]
+
+            if {"red", "green", "blue"}.issubset(vertices.dtype.names):
+                cols = _np.stack([vertices["red"], vertices["green"], vertices["blue"]], axis=1).astype(_np.float32) / 255.0
+            else:
+                cols = _np.ones((len(pts), 3), dtype=_np.float32)
+            cols = _np.hstack((cols, _np.ones((len(pts), 1), dtype=_np.float32)))
+
+            confs = _np.ones((len(pts),), dtype=_np.float32)
+            obj_name = f"{folder_name}_StreamingCloud"
+            create_point_cloud_object(obj_name, pts, cols, confs, collection=target_col)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.report({'ERROR'}, f"Failed to import streaming point cloud: {e}")
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
     def generate_worker(self, context):
         try:
             # Get image paths
@@ -941,6 +1102,10 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 return
             
             print(f"Total images: {len(self.image_paths)}")
+
+            if self.batch_mode == "da3_streaming":
+                self._run_streaming_pipeline(context)
+                return
             
             if self.batch_mode == "skip_frames" and len(self.image_paths) > self.batch_size:
                 import numpy as np
@@ -1338,6 +1503,11 @@ class GeneratePointCloudOperator(bpy.types.Operator):
                 
                 elif msg["type"] == "BATCH_READY":
                     if self.process_batch(context, msg) == {'CANCELLED'}:
+                        self.cleanup(context)
+                        return {'CANCELLED'}
+
+                elif msg["type"] == "STREAMING_PLY":
+                    if self._import_streaming_ply(context, msg) == {'CANCELLED'}:
                         self.cleanup(context)
                         return {'CANCELLED'}
                 

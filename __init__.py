@@ -254,6 +254,7 @@ def register_classes():
             ("last_frame_overlap", "Last Frame Overlap", "Process overlapping batches for large datasets"),
             ("first_last_overlap", "First+Last Overlap", "Use first and last frame of previous batch plus new frames"),
             ("no_overlap", "No Overlap", "You will have to align batches manually"),
+            ("da3_streaming", "DA3 Streaming", "Use DA3-Streaming pipeline inside Blender"),
         ],
         name="Batch Mode",
         description="How to select images for processing",
