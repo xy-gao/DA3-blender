@@ -15,15 +15,14 @@ for p in (
     if p.exists() and p_str not in sys.path:
         sys.path.insert(0, p_str)
 
-import glob
 import json
 
 import matplotlib
-matplotlib.use("Agg")
+# Note: glob imported lazily later; keep alias in scope for run()
+import glob
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import yaml
 from safetensors.torch import load_file
 
 from depth_anything_3.api import DepthAnything3
@@ -31,7 +30,6 @@ from loop_utils.alignment_torch import (
     apply_sim3_direct_torch,
     depth_to_point_cloud_optimized_torch,
 )
-from loop_utils.config_utils import load_config
 from loop_utils.loop_detector import LoopDetector
 from loop_utils.sim3loop import Sim3LoopOptimizer
 from loop_utils.sim3utils import (
@@ -55,24 +53,64 @@ CONFIG_NAME_MAP = {
     "da3nested-giant-large-1.1": "da3nested-giant-large",
 }
 
-
-def _load_base_config(base_cfg_path: Path) -> dict:
-    if base_cfg_path.exists():
-        return load_config(str(base_cfg_path))
-    raise FileNotFoundError(f"Base streaming config not found at {base_cfg_path}")
-
-
 def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size: int) -> dict:
-    addon_root = Path(__file__).parent
-    cfg_path = addon_root / "da3_repo" / "da3_streaming" / "configs" / "base_config_low_vram.yaml"
-    if not cfg_path.exists():
-        cfg_path = addon_root / "da3_repo" / "da3_streaming" / "configs" / "base_config.yaml"
-    cfg = _load_base_config(cfg_path)
-
     model_path = os.path.abspath(model_path)
     model_dir = Path(model_path).parent
 
-    cfg["Weights"]["DA3"] = model_path
+    # Start from an in-memory default config (matching previous base_config_low_vram.yaml)
+    cfg = {
+        "Weights": {
+            "DA3": model_path,
+            "DA3_CONFIG": "",  # set below based on model stem
+            "SALAD": "",        # set below if found/downloaded
+        },
+        "Model": {
+            "chunk_size": max(1, int(chunk_size)),
+            "overlap": max(1, int(overlap)),
+            "loop_chunk_size": max(1, int(loop_chunk_size)),
+            "loop_enable": True,
+            "useDBoW": False,
+            "delete_temp_files": True,
+            "align_lib": "torch",
+            "align_method": "sim3",
+            "scale_compute_method": "auto",
+            "align_type": "dense",
+            "ref_view_strategy": "saddle_balanced",
+            "ref_view_strategy_loop": "saddle_balanced",
+            "depth_threshold": 15.0,
+            "save_depth_conf_result": True,
+            "save_debug_info": False,
+            "Sparse_Align": {
+                "keypoint_select": "orb",
+                "keypoint_num": 5000,
+            },
+            "IRLS": {
+                "delta": 0.1,
+                "max_iters": 5,
+                "tol": "1e-9",
+            },
+            "Pointcloud_Save": {
+                "sample_ratio": 1.0,
+                "conf_threshold_coef": 0.75,
+            },
+        },
+        "Loop": {
+            "SALAD": {
+                "image_size": [336, 336],
+                "batch_size": 32,
+                "similarity_threshold": 0.85,
+                "top_k": 5,
+                "use_nms": True,
+                "nms_threshold": 25,
+            },
+            "SIM3_Optimizer": {
+                "lang_version": "cpp",
+                "max_iterations": 30,
+                # Keep as string because Sim3LoopOptimizer expects to eval() this field
+                "lambda_init": "1e-6",
+            },
+        },
+    }
 
     # Choose config stem using the same mapping as operators.py
     model_stem = Path(model_path).stem
