@@ -1072,7 +1072,7 @@ Loop:
                 context.scene.collection.children.link(target_col)
 
             plydata = PlyData.read(ply_path)
-            vertices = plydata["vertex"]
+            vertices = plydata["vertex"].data  # structured numpy array
             pts = _np.stack([vertices["x"], vertices["y"], vertices["z"]], axis=1).astype(_np.float32)
             # Match the same coordinate conversion used in import_point_cloud
             pts[:, [0, 1, 2]] = pts[:, [0, 2, 1]]

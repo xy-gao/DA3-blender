@@ -27,6 +27,13 @@ load_config = importlib.import_module("config_utils").load_config
 merge_ply_files = importlib.import_module("sim3utils").merge_ply_files
 warmup_numba = importlib.import_module("sim3utils").warmup_numba
 
+# Map alternate checkpoint names to the config stem (mirrors operators.CONFIG_NAME_MAP)
+CONFIG_NAME_MAP = {
+    "da3-large-1.1": "da3-large",
+    "da3-giant-1.1": "da3-giant",
+    "da3nested-giant-large-1.1": "da3nested-giant-large",
+}
+
 
 def _load_base_config(base_cfg_path: Path) -> dict:
     if base_cfg_path.exists():
@@ -41,10 +48,33 @@ def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size
         cfg_path = addon_root / "da3_repo" / "da3_streaming" / "configs" / "base_config.yaml"
     cfg = _load_base_config(cfg_path)
 
+    model_path = os.path.abspath(model_path)
+    model_dir = Path(model_path).parent
+
     cfg["Weights"]["DA3"] = model_path
+
+    # Choose config stem using the same mapping as operators.py
     model_stem = Path(model_path).stem
-    cfg_json = os.path.join(os.path.dirname(model_path), f"{model_stem}.json")
-    cfg["Weights"]["DA3_CONFIG"] = cfg_json
+    config_stem = CONFIG_NAME_MAP.get(model_stem, model_stem)
+    cfg_json = model_dir / f"{config_stem}.json"
+    if not cfg_json.exists():
+        # fall back to original stem
+        cfg_json = model_dir / f"{model_stem}.json"
+    cfg["Weights"]["DA3_CONFIG"] = os.fspath(cfg_json)
+
+    # Point SALAD ckpt using the shared resolver
+    try:
+        from .operators import get_any_model_path  # lazy import to avoid circular deps
+        salad_path = Path(get_any_model_path("dino_salad.ckpt"))
+    except Exception:
+        salad_path = Path(model_dir / "dino_salad.ckpt")
+
+    if salad_path.exists():
+        cfg["Weights"]["SALAD"] = os.fspath(salad_path)
+    else:
+        # If missing, disable loop to avoid crash; log a warning
+        print("Warning: dino_salad.ckpt not found; disabling loop closure.")
+        cfg["Model"]["loop_enable"] = False
 
     cfg["Model"]["chunk_size"] = max(1, int(chunk_size))
     cfg["Model"]["overlap"] = max(1, int(overlap))
