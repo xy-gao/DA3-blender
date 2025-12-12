@@ -62,11 +62,19 @@ def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size
         cfg_json = model_dir / f"{model_stem}.json"
     cfg["Weights"]["DA3_CONFIG"] = os.fspath(cfg_json)
 
-    # Point SALAD ckpt using the shared resolver
+    # Point SALAD ckpt using the shared resolver; auto-download if missing (mirrors segmentation flow)
     try:
-        from .operators import get_any_model_path  # lazy import to avoid circular deps
+        from .operators import get_any_model_path, _URLS  # lazy import to avoid circular deps
         salad_path = Path(get_any_model_path("dino_salad.ckpt"))
-    except Exception:
+        if not salad_path.exists():
+            url = _URLS.get("dino_salad", "")
+            if url:
+                os.makedirs(salad_path.parent, exist_ok=True)
+                print(f"Downloading dino_salad to {salad_path}...")
+                import torch
+                torch.hub.download_url_to_file(url, os.fspath(salad_path))
+    except Exception as e:
+        print(f"Warning: Failed to resolve/download dino_salad.ckpt via get_any_model_path: {e}")
         salad_path = Path(model_dir / "dino_salad.ckpt")
 
     if salad_path.exists():
