@@ -1,10 +1,25 @@
 import os
 import sys
-import glob
-import json
 from pathlib import Path
 
+# Ensure local DA3 repo (and installed deps) are on sys.path before importing bundled modules
+ADDON_ROOT = Path(__file__).parent
+for p in (
+    ADDON_ROOT / "deps_da3",
+    ADDON_ROOT / "deps_public",
+    ADDON_ROOT / "da3_repo",
+    ADDON_ROOT / "da3_repo" / "da3_streaming",
+    ADDON_ROOT / "da3_repo" / "da3_streaming" / "loop_utils",
+):
+    p_str = os.fspath(p)
+    if p.exists() and p_str not in sys.path:
+        sys.path.insert(0, p_str)
+
+import glob
+import json
+
 import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -29,22 +44,6 @@ from loop_utils.sim3utils import (
     warmup_numba,
     weighted_align_point_maps,
 )
-
-matplotlib.use("Agg")
-
-ADDON_ROOT = Path(__file__).parent
-
-# Ensure local DA3 repo (and installed deps) are on sys.path so da3_streaming can be imported
-for p in (
-    ADDON_ROOT / "deps_da3",
-    ADDON_ROOT / "deps_public",
-    ADDON_ROOT / "da3_repo",
-    ADDON_ROOT / "da3_repo" / "da3_streaming",
-    ADDON_ROOT / "da3_repo" / "da3_streaming" / "loop_utils",
-):
-    p_str = os.fspath(p)
-    if p.exists() and p_str not in sys.path:
-        sys.path.insert(0, p_str)
 
 # Dependencies.py already injects deps_public/deps_da3/DA3_DIR into sys.path on addon import.
 # We import the streaming modules directly from the vendored repo folder.
