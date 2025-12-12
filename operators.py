@@ -56,6 +56,8 @@ _URLS = {
     "da3nested-giant-large": "https://huggingface.co/depth-anything/DA3NESTED-GIANT-LARGE/resolve/main/model.safetensors",
     "da3nested-giant-large-1.1": "https://huggingface.co/depth-anything/DA3NESTED-GIANT-LARGE-1.1/resolve/main/model.safetensors",
 
+    "dino_salad": "https://github.com/serizba/salad/releases/download/v1.0.0/dino_salad.ckpt",
+
     "yolov8n-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n-seg.pt",
     "yolov8s-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-seg.pt",
     "yolov8m-seg": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8m-seg.pt",
