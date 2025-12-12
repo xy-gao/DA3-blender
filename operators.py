@@ -741,12 +741,10 @@ class RunStreamingOperator(bpy.types.Operator):
         ]
 
         try:
-            # Set cwd to the streaming folder so relative weight paths in configs resolve
+            # Set cwd to the streaming folder so relative weight paths resolve and inherit stdout/stderr
+            # so logs appear in Blender's system console in real time.
             self.process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
                 env=env,
                 cwd=os.fspath(STREAMING_DIR),
             )
@@ -767,15 +765,6 @@ class RunStreamingOperator(bpy.types.Operator):
                 return {'PASS_THROUGH'}
 
             # Process finished; read remaining output
-            if self.process:
-                try:
-                    out, _ = self.process.communicate(timeout=0.1)
-                    if out:
-                        print(out)
-                        self.log += out
-                except Exception:
-                    pass
-
             wm = context.window_manager
             wm.event_timer_remove(self.timer)
 
