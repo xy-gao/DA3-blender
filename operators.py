@@ -1007,26 +1007,6 @@ Loop:
             
             print(f"Total images: {len(self.image_paths)}")
 
-            if self.batch_mode == "da3_streaming":
-                try:
-                    res = streaming_runner.run_streaming(
-                        image_dir=self.input_folder,
-                        output_dir=getattr(context.scene, "da3_streaming_output", "")
-                        or os.path.join(self.input_folder, "da3_streaming_output"),
-                        model_path=get_model_path(self.base_model_name, context),
-                        chunk_size=self.batch_size,
-                        overlap=max(1, self.batch_size // 2),
-                    )
-                    folder_name = os.path.basename(os.path.normpath(self.input_folder))
-                    self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
-                    self.result_queue.put({"type": "STREAMING_PLY", "path": res["combined_ply"], "folder_name": folder_name})
-                    self.result_queue.put({"type": "DONE"})
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    self.result_queue.put({"type": "ERROR", "message": f"Streaming failed: {e}"})
-                return
-            
             if self.batch_mode == "skip_frames" and len(self.image_paths) > self.batch_size:
                 import numpy as np
                 indices = np.linspace(0, len(self.image_paths) - 1, self.batch_size, dtype=int)
@@ -1096,6 +1076,26 @@ Loop:
             base_model = get_model(self.base_model_name, load_half=self.load_half_precision_model)
             self.update_progress_timer(LoadModelTime, "Loaded base model")
             print("Running base model inference...")
+            if self.batch_mode == "da3_streaming":
+                try:
+                    res = streaming_runner.run_streaming(
+                        image_dir=self.input_folder,
+                        output_dir=getattr(context.scene, "da3_streaming_output", "")
+                        or os.path.join(self.input_folder, "da3_streaming_output"),
+                        model_path=get_model_path(self.base_model_name, context),
+                        chunk_size=self.batch_size,
+                        overlap=max(1, self.batch_size // 2),
+                        model=base_model
+                    )
+                    folder_name = os.path.basename(os.path.normpath(self.input_folder))
+                    self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
+                    self.result_queue.put({"type": "STREAMING_PLY", "path": res["combined_ply"], "folder_name": folder_name})
+                    self.result_queue.put({"type": "DONE"})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self.result_queue.put({"type": "ERROR", "message": f"Streaming failed: {e}"})
+                return
             
             all_base_predictions = []
             prev_pred = None

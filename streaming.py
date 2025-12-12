@@ -231,7 +231,7 @@ def remove_duplicates(data_list):
 
 # Based on DA3_Streaming from da3_streaming.py
 class DA3_Modified_Streaming:
-    def __init__(self, image_dir, save_dir, config):
+    def __init__(self, image_dir, save_dir, config, model=None):
         self.config = config
 
         self.chunk_size = self.config["Model"]["chunk_size"]
@@ -264,13 +264,17 @@ class DA3_Modified_Streaming:
 
         self.delete_temp_files = self.config["Model"]["delete_temp_files"]
 
-        print("Loading model...")
-
-        with open(self.config["Weights"]["DA3_CONFIG"]) as f:
-            config = json.load(f)
-        self.model = DepthAnything3(**config)
-        weight = load_file(self.config["Weights"]["DA3"])
-        self.model.load_state_dict(weight, strict=False)
+        # If a model instance is supplied, reuse it; otherwise load here.
+        if model is not None:
+            print("Using provided DepthAnything3 model instance.")
+            self.model = model
+        else:
+            print("Loading model...")
+            with open(self.config["Weights"]["DA3_CONFIG"]) as f:
+                config = json.load(f)
+            self.model = DepthAnything3(**config)
+            weight = load_file(self.config["Weights"]["DA3"])
+            self.model.load_state_dict(weight, strict=False)
 
         self.model.eval()
         self.model = self.model.to(self.device)
@@ -959,7 +963,14 @@ class DA3_Modified_Streaming:
 
         print(f"Saved disk space: {total_space/1024/1024/1024:.4f} GiB")
 
-def run_streaming(image_dir: str, output_dir: str, model_path: str, chunk_size: int, overlap: int) -> dict:
+def run_streaming(
+    image_dir: str,
+    output_dir: str,
+    model_path: str,
+    chunk_size: int,
+    overlap: int,
+    model=None,
+) -> dict:
     if not os.path.isdir(image_dir):
         raise ValueError(f"Image directory does not exist: {image_dir}")
     os.makedirs(output_dir, exist_ok=True)
@@ -970,7 +981,7 @@ def run_streaming(image_dir: str, output_dir: str, model_path: str, chunk_size: 
     if config["Model"].get("align_lib", "") == "numba":
         warmup_numba()
 
-    da3_streaming = DA3_Modified_Streaming(image_dir, output_dir, config)
+    da3_streaming = DA3_Modified_Streaming(image_dir, output_dir, config, model=model)
     da3_streaming.run()
     da3_streaming.close()
 
