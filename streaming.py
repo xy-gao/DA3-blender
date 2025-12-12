@@ -21,7 +21,8 @@ def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size
     cfg = _load_base_config(cfg_path)
 
     cfg["Weights"]["DA3"] = model_path
-    cfg_json = os.path.join(os.path.dirname(model_path), "config.json")
+    model_stem = Path(model_path).stem
+    cfg_json = os.path.join(os.path.dirname(model_path), f"{model_stem}.json")
     cfg["Weights"]["DA3_CONFIG"] = cfg_json
 
     cfg["Model"]["chunk_size"] = max(1, int(chunk_size))
