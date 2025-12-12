@@ -10,6 +10,8 @@ import datetime
 import subprocess
 import sys
 import tempfile
+
+from . import streaming as streaming_runner
 from .utils import (
     run_model,
     convert_prediction_to_dict,
@@ -1104,7 +1106,23 @@ Loop:
             print(f"Total images: {len(self.image_paths)}")
 
             if self.batch_mode == "da3_streaming":
-                self._run_streaming_pipeline(context)
+                try:
+                    res = streaming_runner.run_streaming(
+                        image_dir=self.input_folder,
+                        output_dir=getattr(context.scene, "da3_streaming_output", "")
+                        or os.path.join(self.input_folder, "da3_streaming_output"),
+                        model_path=get_model_path(self.base_model_name, context),
+                        chunk_size=self.batch_size,
+                        overlap=max(1, self.batch_size // 2),
+                    )
+                    folder_name = os.path.basename(os.path.normpath(self.input_folder))
+                    self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
+                    self.result_queue.put({"type": "STREAMING_PLY", "path": res["combined_ply"], "folder_name": folder_name})
+                    self.result_queue.put({"type": "DONE"})
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    self.result_queue.put({"type": "ERROR", "message": f"Streaming failed: {e}"})
                 return
             
             if self.batch_mode == "skip_frames" and len(self.image_paths) > self.batch_size:
