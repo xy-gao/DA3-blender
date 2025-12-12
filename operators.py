@@ -741,7 +741,15 @@ class RunStreamingOperator(bpy.types.Operator):
         ]
 
         try:
-            self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+            # Set cwd to the streaming folder so relative weight paths in configs resolve
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                cwd=os.fspath(STREAMING_DIR),
+            )
         except Exception as e:
             self.report({'ERROR'}, f"Failed to start streaming: {e}")
             return {'CANCELLED'}
