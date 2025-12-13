@@ -24,8 +24,11 @@ class DA3Panel(bpy.types.Panel):
         else:
             row.operator("da3.download_model", text=f"Download {scene.da3_model_name}")
 
+        # Precision toggle near model selection for clarity
+        layout.prop(scene, "da3_load_half_precision", text="Use FP16 Weights (experimental)")
+
         # Metric model checkbox and download button/status
-        if scene.da3_model_name != "da3nested-giant-large":
+        if scene.da3_model_name not in {"da3nested-giant-large", "da3nested-giant-large-1.1"}:
             layout.prop(scene, "da3_use_metric", text="Use Metric")
             if scene.da3_use_metric:
                 # Metric combination mode
@@ -46,8 +49,9 @@ class DA3Panel(bpy.types.Panel):
         layout.prop(scene, "da3_batch_mode", text="Batch Mode")
         if scene.da3_batch_mode != "ignore_batch_size":
             layout.prop(scene, "da3_batch_size", text="Batch Size")
+        if scene.da3_batch_mode == "da3_streaming":
+            layout.prop(scene, "da3_streaming_output", text="Streaming Output")
         layout.prop(scene, "da3_use_ray_pose", text="Use Ray-based Pose")
-        layout.prop(scene, "da3_use_half_precision", text="Use Half Precision")
         layout.prop(scene, "da3_filter_edges", text="Filter Edges")
         layout.prop(scene, "da3_min_confidence", text="Min Confidence")
         layout.prop(scene, "da3_detect_motion", text="Detect Motion")
@@ -58,8 +62,7 @@ class DA3Panel(bpy.types.Panel):
         if scene.da3_use_segmentation:
             layout.prop(scene, "da3_segmentation_model")
             layout.prop(scene, "da3_segmentation_conf")
-        
-        layout.separator()
+            layout.separator()
 
         layout.prop(scene, "da3_generate_mesh", text="Generate Meshes")
         layout.prop(scene, "da3_output_debug_images", text="Output Debug Images")
@@ -67,3 +70,8 @@ class DA3Panel(bpy.types.Panel):
         row.operator("da3.generate_point_cloud")
         row = layout.row()
         row.operator("da3.unload_model")
+
+        # Progress bar
+        if context.scene.da3_progress >= 0 and context.scene.da3_progress <= 100:
+            layout.label(text=context.scene.da3_progress_stage)
+            layout.progress(factor=context.scene.da3_progress / 100.0)

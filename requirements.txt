@@ -7,7 +7,8 @@ trimesh
 einops
 huggingface_hub
 imageio
-opencv-python
+# Pin to numpy-1.26.x-compatible release; newer (4.12+) requires numpy>=2
+opencv-python==4.11.0.86
 # xformers
 open3d
 fastapi
