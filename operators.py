@@ -1080,6 +1080,7 @@ Loop:
                 try:
                     res = streaming_runner.run_streaming(
                         image_dir=self.input_folder,
+                        image_paths=self.image_paths,
                         output_dir=getattr(context.scene, "da3_streaming_output", "")
                         or os.path.join(self.input_folder, "da3_streaming_output"),
                         model_path=get_model_path(self.base_model_name, context),

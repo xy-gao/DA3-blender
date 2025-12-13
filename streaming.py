@@ -18,8 +18,6 @@ for p in (
 import json
 
 import matplotlib
-# Note: glob imported lazily later; keep alias in scope for run()
-import glob
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -231,8 +229,15 @@ def remove_duplicates(data_list):
 
 # Based on DA3_Streaming from da3_streaming.py
 class DA3_Modified_Streaming:
-    def __init__(self, image_dir, save_dir, config, model=None):
+    def __init__(self, image_dir, save_dir, image_paths, config, model=None):
         self.config = config
+
+        if not image_paths:
+            raise ValueError("image_paths must be a non-empty list of image files")
+        self.img_list = list(image_paths)
+
+        if not save_dir:
+            save_dir = os.path.join(image_dir, "debug_output")
 
         self.chunk_size = self.config["Model"]["chunk_size"]
         self.overlap = self.config["Model"]["overlap"]
@@ -246,7 +251,6 @@ class DA3_Modified_Streaming:
         )
 
         self.img_dir = image_dir
-        self.img_list = None
         self.output_dir = save_dir
 
         self.result_unaligned_dir = os.path.join(save_dir, "_tmp_results_unaligned")
@@ -804,16 +808,8 @@ class DA3_Modified_Streaming:
         print("Done.")
 
     def run(self):
-        print(f"Loading images from {self.img_dir}...")
-        self.img_list = sorted(
-            glob.glob(os.path.join(self.img_dir, "*.jpg"))
-            + glob.glob(os.path.join(self.img_dir, "*.png"))
-        )
-        # print(self.img_list)
-        if len(self.img_list) == 0:
-            raise ValueError(f"[DIR EMPTY] No images found in {self.img_dir}!")
+        print(f"Using provided image list from {self.img_dir}...")
         print(f"Found {len(self.img_list)} images")
-
         self.process_long_sequence()
 
     def save_camera_poses(self):
@@ -965,7 +961,8 @@ class DA3_Modified_Streaming:
 
 def run_streaming(
     image_dir: str,
-    output_dir: str,
+    image_paths: list,
+    output_dir: str | None,
     model_path: str,
     chunk_size: int,
     overlap: int,
@@ -973,6 +970,11 @@ def run_streaming(
 ) -> dict:
     if not os.path.isdir(image_dir):
         raise ValueError(f"Image directory does not exist: {image_dir}")
+    if not image_paths:
+        raise ValueError("image_paths must be a non-empty list of image files")
+
+    if not output_dir:
+        output_dir = os.path.join(image_dir, "debug_output")
     os.makedirs(output_dir, exist_ok=True)
 
     loop_chunk_size = overlap
@@ -981,7 +983,13 @@ def run_streaming(
     if config["Model"].get("align_lib", "") == "numba":
         warmup_numba()
 
-    da3_streaming = DA3_Modified_Streaming(image_dir, output_dir, config, model=model)
+    da3_streaming = DA3_Modified_Streaming(
+        image_dir=image_dir,
+        save_dir=output_dir,
+        image_paths=image_paths,
+        config=config,
+        model=model,
+    )
     da3_streaming.run()
     da3_streaming.close()
 
@@ -989,4 +997,4 @@ def run_streaming(
     combined_ply = os.path.join(pcd_dir, "combined_pcd.ply")
     merge_ply_files(pcd_dir, combined_ply)
 
-    return {"combined_ply": combined_ply, "pcd_dir": pcd_dir}
+    return {"combined_ply": combined_ply, "pcd_dir": pcd_dir, "output_dir": output_dir}
