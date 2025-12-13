@@ -1046,8 +1046,10 @@ Loop:
             TotalTimeEstimate = AfterCombineTimeEstimate + AddImagePointsTime*len(self.image_paths)
             self.start_progress_timer(TotalTimeEstimate)
 
-            def progress_callback(progress_value):
-                # self.progress = progress_value
+            def progress_callback(progress_value, progress_msg=None):
+                self.progress = progress_value
+                if progress_msg:
+                    self.stage = progress_msg
                 if self.stop_event.is_set():
                     return True
                 return False
@@ -1086,7 +1088,8 @@ Loop:
                         model_path=get_model_path(self.base_model_name, context),
                         chunk_size=self.batch_size,
                         overlap=max(1, self.batch_size // 2),
-                        model=base_model
+                        model=base_model,
+                        progress_callback=progress_callback,
                     )
                     folder_name = os.path.basename(os.path.normpath(self.input_folder))
                     self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})

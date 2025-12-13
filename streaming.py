@@ -229,8 +229,13 @@ def remove_duplicates(data_list):
 
 # Based on DA3_Streaming from da3_streaming.py
 class DA3_Modified_Streaming:
-    def __init__(self, image_dir, save_dir, image_paths, config, model=None):
+    def __init__(self, image_dir, save_dir, image_paths, config, model=None, progress_callback=None):
         self.config = config
+
+        # Optional UI progress callback: callable(progress_float 0-1, message) -> bool to request stop
+        self.progress_callback = progress_callback
+        self._progress_done = 0.0
+        self._progress_total = 1.0
 
         if not image_paths:
             raise ValueError("image_paths must be a non-empty list of image files")
@@ -307,6 +312,19 @@ class DA3_Modified_Streaming:
             self.loop_detector.load_model()
 
         print("init done.")
+
+    def _emit_progress(self, inc=0.0, message=""):
+        if self.progress_callback is None:
+            return
+        self._progress_done += inc
+        frac = min(1.0, self._progress_done / max(1.0, self._progress_total))
+        percent = frac * 100.0
+        try:
+            stop = self.progress_callback(percent, message)
+        except Exception:
+            return
+        if stop:
+            raise RuntimeError("Streaming cancelled by user")
 
     def get_loop_pairs(self):
         self.loop_detector.run()
@@ -638,6 +656,10 @@ class DA3_Modified_Streaming:
 
         self.chunk_indices, num_chunks = self.get_chunk_indices()
 
+        # Plan progress steps: chunk inference + pairwise alignment + apply alignment; loop steps added later
+        self._progress_total = num_chunks + max(0, num_chunks - 1) + num_chunks
+        self._emit_progress(0, "Starting streaming")
+
         print(
             f"Processing {len(self.img_list)} images in {num_chunks} \
                 chunks of size {self.chunk_size} with {self.overlap} overlap"
@@ -650,6 +672,7 @@ class DA3_Modified_Streaming:
                 self.chunk_indices[chunk_idx], chunk_idx=chunk_idx
             )
             torch.cuda.empty_cache()
+            self._emit_progress(1, f"Processed chunk {chunk_idx}")
 
             if chunk_idx > 0:
                 print(
@@ -692,6 +715,7 @@ class DA3_Modified_Streaming:
                     chunk2_depth_conf,
                 )
                 self.sim3_list.append((s, R, t))
+                self._emit_progress(1, f"Aligned chunks {chunk_idx-1}->{chunk_idx}")
 
             pre_predictions = cur_predictions
 
@@ -709,6 +733,8 @@ class DA3_Modified_Streaming:
             )
             loop_results = remove_duplicates(loop_results)
             print(loop_results)
+            # Add loop-related progress steps (each loop chunk processed + final optimize)
+            self._progress_total += len(loop_results) + 1
             # return e.g. (31, (1574, 1594), 2, (129, 149))
             for item in loop_results:
                 single_chunk_predictions = self.process_single_chunk(
@@ -717,6 +743,7 @@ class DA3_Modified_Streaming:
 
                 self.loop_predict_list.append((item, single_chunk_predictions))
                 print(item)
+                self._emit_progress(1, "Processed loop pair")
 
             self.loop_sim3_list = self.get_loop_sim3_from_loop_predict(self.loop_predict_list)
 
@@ -724,6 +751,7 @@ class DA3_Modified_Streaming:
                 self.sim3_list
             )  # just for plot
             self.sim3_list = self.loop_optimizer.optimize(self.sim3_list, self.loop_sim3_list)
+            self._emit_progress(1, "Optimized loop closures")
             optimized_abs_poses = self.loop_optimizer.sequential_to_absolute_poses(
                 self.sim3_list
             )  # just for plot
@@ -803,7 +831,13 @@ class DA3_Modified_Streaming:
                 predictions.depth *= s
                 self.save_depth_conf_result(predictions, chunk_idx + 1, s, R, t)
 
+            self._emit_progress(1, f"Applied alignment chunk {chunk_idx+1}")
+
         self.save_camera_poses()
+
+        # Ensure progress reaches 100%
+        self._progress_done = self._progress_total
+        self._emit_progress(0, "Done")
 
         print("Done.")
 
@@ -967,6 +1001,7 @@ def run_streaming(
     chunk_size: int,
     overlap: int,
     model=None,
+    progress_callback=None,
 ) -> dict:
     if not os.path.isdir(image_dir):
         raise ValueError(f"Image directory does not exist: {image_dir}")
@@ -989,6 +1024,7 @@ def run_streaming(
         image_paths=image_paths,
         config=config,
         model=model,
+        progress_callback=progress_callback,
     )
     da3_streaming.run()
     da3_streaming.close()
