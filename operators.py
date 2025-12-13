@@ -1091,8 +1091,6 @@ Loop:
                         model=base_model,
                         progress_callback=progress_callback,
                     )
-                    folder_name = os.path.basename(os.path.normpath(self.input_folder))
-                    self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
                     self.result_queue.put({"type": "STREAMING_PLY", "path": res["combined_ply"], "folder_name": folder_name})
                     self.result_queue.put({"type": "DONE"})
                 except Exception as e:
