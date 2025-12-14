@@ -51,7 +51,7 @@ CONFIG_NAME_MAP = {
     "da3nested-giant-large-1.1": "da3nested-giant-large",
 }
 
-def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size: int) -> dict:
+def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size: int, ref_view_strategy: str = "saddle_balanced") -> dict:
     model_path = os.path.abspath(model_path)
     model_dir = Path(model_path).parent
 
@@ -73,8 +73,8 @@ def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size
             "align_method": "sim3",
             "scale_compute_method": "auto",
             "align_type": "dense",
-            "ref_view_strategy": "saddle_balanced",
-            "ref_view_strategy_loop": "saddle_balanced",
+            "ref_view_strategy": ref_view_strategy,
+            "ref_view_strategy_loop": ref_view_strategy,
             "depth_threshold": 15.0,
             "save_depth_conf_result": True,
             "save_debug_info": False,
@@ -1002,6 +1002,7 @@ def run_streaming(
     overlap: int,
     model=None,
     progress_callback=None,
+    ref_view_strategy: str = "saddle_balanced",
 ) -> dict:
     if not os.path.isdir(image_dir):
         raise ValueError(f"Image directory does not exist: {image_dir}")
@@ -1013,7 +1014,7 @@ def run_streaming(
     os.makedirs(output_dir, exist_ok=True)
 
     loop_chunk_size = overlap
-    config = build_config(model_path, chunk_size, overlap, loop_chunk_size)
+    config = build_config(model_path, chunk_size, overlap, loop_chunk_size, ref_view_strategy)
 
     if config["Model"].get("align_lib", "") == "numba":
         warmup_numba()

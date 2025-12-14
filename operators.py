@@ -772,6 +772,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.batch_mode = getattr(context.scene, "da3_batch_mode", "skip_frames")
         self.batch_size = getattr(context.scene, "da3_batch_size", 10)
         self.frame_stride = getattr(context.scene, "da3_frame_stride", 1)
+        self.ref_view_strategy = getattr(context.scene, "da3_ref_view_strategy", "saddle_balanced")
         self.use_segmentation = getattr(context.scene, "da3_use_segmentation", False)
         self.segmentation_conf = getattr(context.scene, "da3_segmentation_conf", 0.25)
         self.segmentation_model = getattr(context.scene, "da3_segmentation_model", "yolo11x-seg")
@@ -838,7 +839,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             "min_confidence": self.min_confidence
         })
 
-    def _write_streaming_config(self, model_path, chunk_size, overlap, loop_chunk_size, output_dir):
+    def _write_streaming_config(self, model_path, chunk_size, overlap, loop_chunk_size, output_dir, ref_view_strategy):
         # Build a minimal YAML config string using current UI settings
         weights_cfg = model_path.replace('\\', '/')
         config_json = os.path.join(os.path.dirname(model_path), "config.json").replace('\\', '/')
@@ -861,8 +862,8 @@ Model:
   scale_compute_method: 'auto'
   align_type: 'dense'
 
-  ref_view_strategy: 'saddle_balanced'
-  ref_view_strategy_loop: 'saddle_balanced'
+  ref_view_strategy: '{ref_view_strategy}'
+  ref_view_strategy_loop: '{ref_view_strategy}'
   depth_threshold: 15.0
 
   save_depth_conf_result: True
@@ -914,7 +915,7 @@ Loop:
         overlap = max(1, chunk_size // 2)
         loop_chunk_size = overlap
 
-        cfg_path = self._write_streaming_config(model_path, chunk_size, overlap, loop_chunk_size, output_dir)
+        cfg_path = self._write_streaming_config(model_path, chunk_size, overlap, loop_chunk_size, output_dir, self.ref_view_strategy)
 
         env = os.environ.copy()
         py_path_parts = []
@@ -1097,6 +1098,7 @@ Loop:
                         overlap=max(1, self.batch_size // 2),
                         model=base_model,
                         progress_callback=progress_callback,
+                        ref_view_strategy=self.ref_view_strategy,
                     )
                     self.result_queue.put({"type": "STREAMING_PLY", "path": res["combined_ply"], "folder_name": folder_name})
                     self.result_queue.put({"type": "DONE"})
@@ -1135,7 +1137,7 @@ Loop:
                     batch_paths = self.image_paths[start_idx:end_idx]
                     batch_indices = list(range(start_idx, end_idx))
                     print(f"Batch {batch_idx + 1}/{num_batches}:")
-                    prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
+                    prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, ref_view_strategy=self.ref_view_strategy)
                     self.update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
                     process_result_if_ready(prediction, batch_indices)
 
@@ -1148,7 +1150,7 @@ Loop:
                         batch_paths = self.image_paths[start_idx:end_idx]
                         batch_indices = list(range(start_idx, end_idx))
                         print(f"Batch {batch_idx + 1}/{num_batches}:")
-                        prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
+                        prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, ref_view_strategy=self.ref_view_strategy)
                         self.update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
                         process_result_if_ready(prediction, batch_indices)
                 else:
@@ -1176,7 +1178,7 @@ Loop:
                     while True:
                         batch_paths = [self.image_paths[i] for i in batch_indices]
                         print(f"Batch {batch_idx + 1}/{num_batches}:")
-                        prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
+                        prediction = run_model(batch_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, ref_view_strategy=self.ref_view_strategy)
                         end_idx = batch_indices[-1] + 1
                         self.update_progress_timer(LoadModelTime + end_idx * BatchTimePerImage, f"Base batch {batch_idx + 1}")
                         process_result_if_ready(prediction, batch_indices.copy())
@@ -1199,7 +1201,7 @@ Loop:
                         remaining_start = next_end
                         batch_idx += 1
             else:
-                prediction = run_model(self.image_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
+                prediction = run_model(self.image_paths, base_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, ref_view_strategy=self.ref_view_strategy)
                 self.update_progress_timer(LoadModelTime + len(self.image_paths) * BatchTimePerImage, "Base batch complete")
                 process_result_if_ready(prediction, list(range(len(self.image_paths))))
             
@@ -1241,7 +1243,8 @@ Loop:
                             self.process_res,
                             self.process_res_method,
                             use_half=self.use_half_precision,
-                            use_ray_pose=self.use_ray_pose
+                            use_ray_pose=self.use_ray_pose,
+                            ref_view_strategy=self.ref_view_strategy
                         )
                         self.update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end * MetricBatchTimePerImage, "Metric batch complete")
                         all_metric_predictions.append((prediction, batch_indices.copy()))
@@ -1255,7 +1258,7 @@ Loop:
                                 batch_paths = self.image_paths[start_idx:end_idx]
                                 batch_indices = list(range(start_idx, end_idx))
                                 print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
+                                prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, ref_view_strategy=self.ref_view_strategy)
                                 self.update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end_idx * MetricBatchTimePerImage, f"Metric batch {batch_idx + 1}")
                                 all_metric_predictions.append((prediction, batch_indices))
 
@@ -1269,7 +1272,7 @@ Loop:
                                     batch_paths = self.image_paths[start_idx:end_idx]
                                     batch_indices = list(range(start_idx, end_idx))
                                     print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                    prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
+                                    prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, ref_view_strategy=self.ref_view_strategy)
                                     self.update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end_idx * MetricBatchTimePerImage, f"Metric batch {batch_idx + 1}")
                                     all_metric_predictions.append((prediction, batch_indices))
                             else:
@@ -1295,7 +1298,7 @@ Loop:
                                 while True:
                                     batch_paths = [self.image_paths[i] for i in batch_indices]
                                     print(f"Batch {batch_idx + 1}/{num_batches}:")
-                                    prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
+                                    prediction = run_model(batch_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, ref_view_strategy=self.ref_view_strategy)
                                     end_idx = batch_indices[-1] + 1
                                     self.update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + end_idx * MetricBatchTimePerImage, f"Metric batch {batch_idx + 1}")
                                     all_metric_predictions.append((prediction, batch_indices.copy()))
@@ -1316,7 +1319,7 @@ Loop:
                                     remaining_start = next_end
                                     batch_idx += 1
                         else:
-                            prediction = run_model(self.image_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose)
+                            prediction = run_model(self.image_paths, metric_model, self.process_res, self.process_res_method, use_half=self.use_half_precision, use_ray_pose=self.use_ray_pose, ref_view_strategy=self.ref_view_strategy)
                             all_metric_predictions.append((prediction, list(range(len(self.image_paths)))))
                             self.update_progress_timer(BaseTimeEstimate + MetricLoadModelTime + len(self.image_paths) * MetricBatchTimePerImage, "Metric batch complete")
                     metric_model = None

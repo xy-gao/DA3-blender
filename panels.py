@@ -50,6 +50,7 @@ class DA3Panel(bpy.types.Panel):
         if scene.da3_batch_mode != "ignore_batch_size":
             layout.prop(scene, "da3_batch_size", text="Batch Size")
         layout.prop(scene, "da3_frame_stride", text="Frame Stride")
+        layout.prop(scene, "da3_ref_view_strategy", text="Ref View Strategy")
         if scene.da3_batch_mode == "da3_streaming":
             layout.prop(scene, "da3_streaming_output", text="Streaming Output")
         layout.prop(scene, "da3_use_ray_pose", text="Use Ray-based Pose")

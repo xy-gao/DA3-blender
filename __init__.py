@@ -241,6 +241,17 @@ def register_classes():
         default=1,
         min=1
     )
+    bpy.types.Scene.da3_ref_view_strategy = bpy.props.EnumProperty(
+        items=[
+            ("first", "First", "Use the first frame as reference"),
+            ("middle", "Middle", "Use the middle frame as reference"),
+            ("saddle_balanced", "Saddle Balanced", "Balanced saddle strategy"),
+            ("saddle_sim_range", "Saddle Sim Range", "Saddle similarity range strategy"),
+        ],
+        name="Reference View Strategy",
+        description="Strategy for selecting the reference view in DA3 Streaming",
+        default="saddle_balanced"
+    )
     bpy.types.Scene.da3_batch_mode = bpy.props.EnumProperty(
         items=[
             ("ignore_batch_size", "Ignore Batch Size", "Process all images (may use excessive VRAM)"),
@@ -345,6 +356,7 @@ def unregister_classes():
     del bpy.types.Scene.da3_use_ray_pose
     del bpy.types.Scene.da3_batch_size
     del bpy.types.Scene.da3_frame_stride
+    del bpy.types.Scene.da3_ref_view_strategy
     del bpy.types.Scene.da3_batch_mode
     del bpy.types.Scene.da3_filter_edges
     del bpy.types.Scene.da3_min_confidence

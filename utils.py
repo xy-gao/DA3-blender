@@ -41,7 +41,7 @@ def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics, progress_cal
 
     return world_points
 
-def run_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False, use_ray_pose=False, progress_callback=None):
+def run_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False, use_ray_pose=False, progress_callback=None, ref_view_strategy="saddle_balanced"):
     print(f"Processing {len(image_paths)} images")
     if not image_paths:
         raise ValueError("No images provided.")
@@ -58,9 +58,9 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
     if use_half:
         # Ensure all inputs/activations run in fp16 to match fp16 weights when load_half_precision_model is set
         with amp.autocast(dtype=torch.float16):
-            prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
+            prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose, ref_view_strategy=ref_view_strategy)
     else:
-        prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
+        prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose, ref_view_strategy=ref_view_strategy)
 
     if torch.cuda.is_available():
         peak = torch.cuda.max_memory_allocated() / 1024**2
