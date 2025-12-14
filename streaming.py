@@ -1038,7 +1038,7 @@ def run_streaming(
     da3_streaming.close()
 
     pcd_dir = os.path.join(output_dir, "pcd")
-    combined_ply = os.path.join(pcd_dir, "combined_pcd.ply")
+    combined_ply = os.path.join(output_dir, "combined_pcd.ply")
     merge_ply_files(pcd_dir, combined_ply)
 
     return {"combined_ply": combined_ply, "pcd_dir": pcd_dir, "output_dir": output_dir}

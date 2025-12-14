@@ -286,9 +286,8 @@ def register_classes():
     bpy.types.Scene.da3_streaming_depth_threshold = bpy.props.FloatProperty(
         name="Depth Threshold",
         description="Threshold for depth filtering in meters",
-        default=15.0,
-        min=0.1,
-        max=100.0
+        default=200.0,
+        min=0
     )
     bpy.types.Scene.da3_streaming_save_debug = bpy.props.BoolProperty(
         name="Save Debug Info",
@@ -298,7 +297,7 @@ def register_classes():
     bpy.types.Scene.da3_streaming_conf_threshold_coef = bpy.props.FloatProperty(
         name="Confidence Threshold Coef",
         description="Coefficient for dynamic confidence threshold (threshold = mean_conf * coef)",
-        default=0.75,
+        default=0,
         min=0.0,
         max=1.0
     )

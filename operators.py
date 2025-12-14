@@ -960,7 +960,7 @@ Loop:
             self.result_queue.put({"type": "ERROR", "message": f"Failed to run DA3-Streaming: {e}"})
             return
 
-        combined_pcd = os.path.join(output_dir, "pcd", "combined_pcd.ply")
+        combined_pcd = os.path.join(output_dir, "combined_pcd.ply")
         if not os.path.exists(combined_pcd):
             self.result_queue.put({"type": "ERROR", "message": "Streaming completed but combined_pcd.ply not found."})
             return
