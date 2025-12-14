@@ -235,6 +235,12 @@ def register_classes():
         default=10,
         min=1
     )
+    bpy.types.Scene.da3_frame_stride = bpy.props.IntProperty(
+        name="Frame Stride",
+        description="Process every Nth frame from the input sequence (1 = all frames, 2 = every 2nd frame, etc.)",
+        default=1,
+        min=1
+    )
     bpy.types.Scene.da3_batch_mode = bpy.props.EnumProperty(
         items=[
             ("ignore_batch_size", "Ignore Batch Size", "Process all images (may use excessive VRAM)"),
@@ -335,8 +341,10 @@ def unregister_classes():
     del bpy.types.Scene.da3_metric_mode
     del bpy.types.Scene.da3_process_res
     del bpy.types.Scene.da3_process_res_method
+    del bpy.types.Scene.da3_load_half_precision
     del bpy.types.Scene.da3_use_ray_pose
     del bpy.types.Scene.da3_batch_size
+    del bpy.types.Scene.da3_frame_stride
     del bpy.types.Scene.da3_batch_mode
     del bpy.types.Scene.da3_filter_edges
     del bpy.types.Scene.da3_min_confidence

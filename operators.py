@@ -771,6 +771,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.generate_mesh = getattr(context.scene, "da3_generate_mesh", False)
         self.batch_mode = getattr(context.scene, "da3_batch_mode", "skip_frames")
         self.batch_size = getattr(context.scene, "da3_batch_size", 10)
+        self.frame_stride = getattr(context.scene, "da3_frame_stride", 1)
         self.use_segmentation = getattr(context.scene, "da3_use_segmentation", False)
         self.segmentation_conf = getattr(context.scene, "da3_segmentation_conf", 0.25)
         self.segmentation_model = getattr(context.scene, "da3_segmentation_model", "yolo11x-seg")
@@ -1006,6 +1007,12 @@ Loop:
                 return
             
             print(f"Total images: {len(self.image_paths)}")
+
+            # Apply frame stride subsampling
+            frame_stride = getattr(context.scene, "da3_frame_stride", 1)
+            if frame_stride > 1:
+                self.image_paths = self.image_paths[::frame_stride]
+                print(f"After frame stride {frame_stride}: {len(self.image_paths)} images")
 
             if self.batch_mode == "skip_frames" and len(self.image_paths) > self.batch_size:
                 import numpy as np
