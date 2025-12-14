@@ -773,6 +773,13 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.batch_size = getattr(context.scene, "da3_batch_size", 10)
         self.frame_stride = getattr(context.scene, "da3_frame_stride", 1)
         self.ref_view_strategy = getattr(context.scene, "da3_ref_view_strategy", "saddle_balanced")
+        self.streaming_loop_enable = getattr(context.scene, "da3_streaming_loop_enable", True)
+        self.streaming_use_db_ow = getattr(context.scene, "da3_streaming_use_db_ow", False)
+        self.streaming_align_lib = getattr(context.scene, "da3_streaming_align_lib", "torch")
+        self.streaming_align_method = getattr(context.scene, "da3_streaming_align_method", "sim3")
+        self.streaming_depth_threshold = getattr(context.scene, "da3_streaming_depth_threshold", 15.0)
+        self.streaming_save_debug = getattr(context.scene, "da3_streaming_save_debug", False)
+        self.streaming_conf_threshold_coef = getattr(context.scene, "da3_streaming_conf_threshold_coef", 0.75)
         self.use_segmentation = getattr(context.scene, "da3_use_segmentation", False)
         self.segmentation_conf = getattr(context.scene, "da3_segmentation_conf", 0.25)
         self.segmentation_model = getattr(context.scene, "da3_segmentation_model", "yolo11x-seg")
@@ -854,20 +861,20 @@ Model:
   chunk_size: {chunk_size}
   overlap: {overlap}
   loop_chunk_size: {loop_chunk_size} # imgs of loop chunk = 2 * loop_chunk_size
-  loop_enable: True
-  useDBoW: False
+  loop_enable: {str(self.streaming_loop_enable).lower()}
+  useDBoW: {str(self.streaming_use_db_ow).lower()}
   delete_temp_files: True
-  align_lib: 'torch'
-  align_method: 'sim3'
+  align_lib: '{self.streaming_align_lib}'
+  align_method: '{self.streaming_align_method}'
   scale_compute_method: 'auto'
   align_type: 'dense'
 
   ref_view_strategy: '{ref_view_strategy}'
   ref_view_strategy_loop: '{ref_view_strategy}'
-  depth_threshold: 15.0
+  depth_threshold: {self.streaming_depth_threshold}
 
   save_depth_conf_result: True
-  save_debug_info: False
+  save_debug_info: {str(self.streaming_save_debug).lower()}
 
   Sparse_Align:
     keypoint_select: 'orb'
@@ -1099,6 +1106,13 @@ Loop:
                         model=base_model,
                         progress_callback=progress_callback,
                         ref_view_strategy=self.ref_view_strategy,
+                        loop_enable=self.streaming_loop_enable,
+                        use_db_ow=self.streaming_use_db_ow,
+                        align_lib=self.streaming_align_lib,
+                        align_method=self.streaming_align_method,
+                        depth_threshold=self.streaming_depth_threshold,
+                        save_debug=self.streaming_save_debug,
+                        conf_threshold_coef=self.streaming_conf_threshold_coef,
                     )
                     self.result_queue.put({"type": "STREAMING_PLY", "path": res["combined_ply"], "folder_name": folder_name})
                     self.result_queue.put({"type": "DONE"})

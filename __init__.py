@@ -252,6 +252,56 @@ def register_classes():
         description="Strategy for selecting the reference view in DA3 Streaming",
         default="saddle_balanced"
     )
+    bpy.types.Scene.da3_streaming_loop_enable = bpy.props.BoolProperty(
+        name="Enable Loop Closure",
+        description="Enable loop closure for better alignment in long sequences",
+        default=True
+    )
+    bpy.types.Scene.da3_streaming_use_db_ow = bpy.props.BoolProperty(
+        name="Use DBOW",
+        description="Use DBOW for loop detection (experimental)",
+        default=False
+    )
+    bpy.types.Scene.da3_streaming_align_lib = bpy.props.EnumProperty(
+        items=[
+            ("torch", "Torch", "Use PyTorch for alignment (GPU)"),
+            ("triton", "Triton", "Use Triton for alignment (GPU, faster)"),
+            ("numba", "Numba", "Use Numba for alignment (CPU)"),
+            ("numpy", "NumPy", "Use NumPy for alignment (CPU, slow)"),
+        ],
+        name="Alignment Library",
+        description="Library to use for point cloud alignment",
+        default="torch"
+    )
+    bpy.types.Scene.da3_streaming_align_method = bpy.props.EnumProperty(
+        items=[
+            ("sim3", "Sim3", "Similarity transformation (scale + rotation + translation)"),
+            ("se3", "SE3", "Rigid transformation (rotation + translation)"),
+            ("scale+se3", "Scale+SE3", "Scale followed by rigid transformation"),
+        ],
+        name="Alignment Method",
+        description="Method for aligning point clouds between batches",
+        default="sim3"
+    )
+    bpy.types.Scene.da3_streaming_depth_threshold = bpy.props.FloatProperty(
+        name="Depth Threshold",
+        description="Threshold for depth filtering in meters",
+        default=15.0,
+        min=0.1,
+        max=100.0
+    )
+    bpy.types.Scene.da3_streaming_save_debug = bpy.props.BoolProperty(
+        name="Save Debug Info",
+        description="Save additional debug information during processing",
+        default=False
+    )
+    bpy.types.Scene.da3_streaming_conf_threshold_coef = bpy.props.FloatProperty(
+        name="Confidence Threshold Coef",
+        description="Coefficient for dynamic confidence threshold (threshold = mean_conf * coef)",
+        default=0.75,
+        min=0.0,
+        max=1.0
+    )
     bpy.types.Scene.da3_batch_mode = bpy.props.EnumProperty(
         items=[
             ("ignore_batch_size", "Ignore Batch Size", "Process all images (may use excessive VRAM)"),
@@ -357,6 +407,13 @@ def unregister_classes():
     del bpy.types.Scene.da3_batch_size
     del bpy.types.Scene.da3_frame_stride
     del bpy.types.Scene.da3_ref_view_strategy
+    del bpy.types.Scene.da3_streaming_loop_enable
+    del bpy.types.Scene.da3_streaming_use_db_ow
+    del bpy.types.Scene.da3_streaming_align_lib
+    del bpy.types.Scene.da3_streaming_align_method
+    del bpy.types.Scene.da3_streaming_depth_threshold
+    del bpy.types.Scene.da3_streaming_save_debug
+    del bpy.types.Scene.da3_streaming_conf_threshold_coef
     del bpy.types.Scene.da3_batch_mode
     del bpy.types.Scene.da3_filter_edges
     del bpy.types.Scene.da3_min_confidence

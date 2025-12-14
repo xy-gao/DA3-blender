@@ -51,7 +51,7 @@ CONFIG_NAME_MAP = {
     "da3nested-giant-large-1.1": "da3nested-giant-large",
 }
 
-def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size: int, ref_view_strategy: str = "saddle_balanced") -> dict:
+def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size: int, ref_view_strategy: str = "saddle_balanced", loop_enable: bool = True, use_db_ow: bool = False, align_lib: str = "torch", align_method: str = "sim3", depth_threshold: float = 15.0, save_debug: bool = False, conf_threshold_coef: float = 0.75) -> dict:
     model_path = os.path.abspath(model_path)
     model_dir = Path(model_path).parent
 
@@ -66,18 +66,18 @@ def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size
             "chunk_size": max(1, int(chunk_size)),
             "overlap": max(1, int(overlap)),
             "loop_chunk_size": max(1, int(loop_chunk_size)),
-            "loop_enable": True,
-            "useDBoW": False,
+            "loop_enable": loop_enable,
+            "useDBoW": use_db_ow,
             "delete_temp_files": True,
-            "align_lib": "torch",
-            "align_method": "sim3",
+            "align_lib": align_lib,
+            "align_method": align_method,
             "scale_compute_method": "auto",
             "align_type": "dense",
             "ref_view_strategy": ref_view_strategy,
             "ref_view_strategy_loop": ref_view_strategy,
-            "depth_threshold": 15.0,
+            "depth_threshold": depth_threshold,
             "save_depth_conf_result": True,
-            "save_debug_info": False,
+            "save_debug_info": save_debug,
             "Sparse_Align": {
                 "keypoint_select": "orb",
                 "keypoint_num": 5000,
@@ -89,7 +89,7 @@ def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size
             },
             "Pointcloud_Save": {
                 "sample_ratio": 1.0,
-                "conf_threshold_coef": 0.75,
+                "conf_threshold_coef": conf_threshold_coef,
             },
         },
         "Loop": {
@@ -1003,6 +1003,13 @@ def run_streaming(
     model=None,
     progress_callback=None,
     ref_view_strategy: str = "saddle_balanced",
+    loop_enable: bool = True,
+    use_db_ow: bool = False,
+    align_lib: str = "torch",
+    align_method: str = "sim3",
+    depth_threshold: float = 15.0,
+    save_debug: bool = False,
+    conf_threshold_coef: float = 0.75,
 ) -> dict:
     if not os.path.isdir(image_dir):
         raise ValueError(f"Image directory does not exist: {image_dir}")
@@ -1014,7 +1021,7 @@ def run_streaming(
     os.makedirs(output_dir, exist_ok=True)
 
     loop_chunk_size = overlap
-    config = build_config(model_path, chunk_size, overlap, loop_chunk_size, ref_view_strategy)
+    config = build_config(model_path, chunk_size, overlap, loop_chunk_size, ref_view_strategy, loop_enable, use_db_ow, align_lib, align_method, depth_threshold, save_debug, conf_threshold_coef)
 
     if config["Model"].get("align_lib", "") == "numba":
         warmup_numba()
