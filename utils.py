@@ -975,7 +975,7 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
         try:
             depth = d["depth"]
             for i in range(len(depth)):
-                dm = depth[i]
+                dm = depth[i].astype(np.float32)  # Ensure float32 for OpenCV Sobel
                 gx = cv2.Sobel(dm, cv2.CV_64F, 1, 0, ksize=3)
                 gy = cv2.Sobel(dm, cv2.CV_64F, 0, 1, ksize=3)
                 mag = np.sqrt(gx**2 + gy**2)

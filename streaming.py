@@ -232,7 +232,7 @@ class DA3_Modified_Streaming:
     def __init__(self, image_dir, save_dir, image_paths, config, model=None, progress_callback=None):
         self.config = config
 
-        # Optional UI progress callback: callable(progress_float 0-1, message) -> bool to request stop
+        # Optional UI progress callback: callable(progress_float 0-100, message) -> bool to request stop
         self.progress_callback = progress_callback
         self._progress_done = 0.0
         self._progress_total = 1.0
