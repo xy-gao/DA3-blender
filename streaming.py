@@ -41,6 +41,191 @@ from loop_utils.sim3utils import (
     weighted_align_point_maps,
 )
 
+def write_ply_header_with_conf(f, num_vertices):
+    header = [
+        "ply",
+        "format binary_little_endian 1.0",
+        f"element vertex {num_vertices}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "property float confidence",
+        "end_header",
+    ]
+    f.write("\n".join(header).encode() + b"\n")
+
+
+def write_ply_batch_with_conf(f, points, colors, confs):
+    structured = np.zeros(
+        len(points),
+        dtype=[
+            ("x", np.float32),
+            ("y", np.float32),
+            ("z", np.float32),
+            ("red", np.uint8),
+            ("green", np.uint8),
+            ("blue", np.uint8),
+            ("confidence", np.float32),
+        ],
+    )
+
+    structured["x"] = points[:, 0]
+    structured["y"] = points[:, 1]
+    structured["z"] = points[:, 2]
+    structured["red"] = colors[:, 0]
+    structured["green"] = colors[:, 1]
+    structured["blue"] = colors[:, 2]
+    structured["confidence"] = confs
+
+    f.write(structured.tobytes())
+
+
+def save_ply_with_conf(points, colors, confs, filename):
+    with open(filename, "wb") as f:
+        write_ply_header_with_conf(f, len(points))
+        write_ply_batch_with_conf(f, points, colors, confs)
+
+
+def save_confident_pointcloud_batch_with_conf(
+    points, colors, confs, output_path, conf_threshold, sample_ratio=1.0, batch_size=1000000
+):
+    """
+    Same as save_confident_pointcloud_batch but saves confidence values in PLY.
+    - points: np.ndarray,  (b, H, W, 3) / (N, 3)
+    - colors: np.ndarray,  (b, H, W, 3) / (N, 3)
+    - confs: np.ndarray,  (b, H, W) / (N,)
+    - output_path: str
+    - conf_threshold: float,
+    - sample_ratio: float (0 < sample_ratio <= 1.0)
+    - batch_size: int
+    """
+    if points.ndim == 2:
+        b = 1
+        points = points[np.newaxis, ...]
+        colors = colors[np.newaxis, ...]
+        confs = confs[np.newaxis, ...]
+    elif points.ndim == 4:
+        b = points.shape[0]
+    else:
+        raise ValueError("Unsupported points dimension. Must be 2 (N,3) or 4 (b,H,W,3)")
+
+    total_valid = 0
+    for i in range(b):
+        cfs = confs[i].reshape(-1)
+        total_valid += np.count_nonzero((cfs >= conf_threshold) & (cfs > 1e-5))
+
+    num_samples = int(total_valid * sample_ratio) if sample_ratio < 1.0 else total_valid
+
+    if num_samples == 0:
+        save_ply_with_conf(np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8), np.zeros((0,), dtype=np.float32), output_path)
+        return
+
+    if sample_ratio == 1.0:
+        with open(output_path, "wb") as f:
+            write_ply_header_with_conf(f, num_samples)
+
+            for i in range(b):
+                pts = points[i].reshape(-1, 3).astype(np.float32)
+                cls = colors[i].reshape(-1, 3).astype(np.uint8)
+                cfs = confs[i].reshape(-1).astype(np.float32)
+
+                mask = (cfs >= conf_threshold) & (cfs > 1e-5)
+                valid_pts = pts[mask]
+                valid_cls = cls[mask]
+                valid_cfs = cfs[mask]
+
+                for j in range(0, len(valid_pts), batch_size):
+                    batch_pts = valid_pts[j : j + batch_size]
+                    batch_cls = valid_cls[j : j + batch_size]
+                    batch_cfs = valid_cfs[j : j + batch_size]
+                    write_ply_batch_with_conf(f, batch_pts, batch_cls, batch_cfs)
+
+    else:
+        reservoir_pts = np.zeros((num_samples, 3), dtype=np.float32)
+        reservoir_clr = np.zeros((num_samples, 3), dtype=np.uint8)
+        reservoir_cfs = np.zeros((num_samples,), dtype=np.float32)
+        count = 0
+
+        for i in range(b):
+            pts = points[i].reshape(-1, 3).astype(np.float32)
+            cls = colors[i].reshape(-1, 3).astype(np.uint8)
+            cfs = confs[i].reshape(-1).astype(np.float32)
+
+            mask = (cfs >= conf_threshold) & (cfs > 1e-5)
+            valid_pts = pts[mask]
+            valid_cls = cls[mask]
+            valid_cfs = cfs[mask]
+            n_valid = len(valid_pts)
+
+            if count < num_samples:
+                fill_count = min(num_samples - count, n_valid)
+
+                reservoir_pts[count : count + fill_count] = valid_pts[:fill_count]
+                reservoir_clr[count : count + fill_count] = valid_cls[:fill_count]
+                reservoir_cfs[count : count + fill_count] = valid_cfs[:fill_count]
+                count += fill_count
+
+                if fill_count < n_valid:
+                    remaining_pts = valid_pts[fill_count:]
+                    remaining_cls = valid_cls[fill_count:]
+                    remaining_cfs = valid_cfs[fill_count:]
+
+                    count, reservoir_pts, reservoir_clr, reservoir_cfs = optimized_vectorized_reservoir_sampling_with_conf(
+                        remaining_pts, remaining_cls, remaining_cfs, count, reservoir_pts, reservoir_clr, reservoir_cfs
+                    )
+            else:
+                count, reservoir_pts, reservoir_clr, reservoir_cfs = optimized_vectorized_reservoir_sampling_with_conf(
+                    valid_pts, valid_cls, valid_cfs, count, reservoir_pts, reservoir_clr, reservoir_cfs
+                )
+
+        save_ply_with_conf(reservoir_pts, reservoir_clr, reservoir_cfs, output_path)
+
+
+def optimized_vectorized_reservoir_sampling_with_conf(
+    new_points: np.ndarray,
+    new_colors: np.ndarray,
+    new_confs: np.ndarray,
+    current_count: int,
+    reservoir_points: np.ndarray,
+    reservoir_colors: np.ndarray,
+    reservoir_confs: np.ndarray,
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Optimized vectorized reservoir sampling with confidence.
+    """
+    random_gen = np.random
+
+    reservoir_size = len(reservoir_points)
+    num_new_points = len(new_points)
+
+    if num_new_points == 0:
+        return current_count, reservoir_points, reservoir_colors, reservoir_confs
+
+    # Calculate sequential indices for each new point
+    point_indices = np.arange(current_count + 1, current_count + num_new_points + 1)
+
+    # Generate random numbers for each point
+    random_values = random_gen.randint(0, point_indices, size=num_new_points)
+
+    # Determine which points should replace reservoir elements
+    replacement_mask = random_values < reservoir_size
+    replacement_positions = random_values[replacement_mask]
+
+    # Apply replacements
+    if np.any(replacement_mask):
+        points_to_replace = new_points[replacement_mask]
+        colors_to_replace = new_colors[replacement_mask]
+        confs_to_replace = new_confs[replacement_mask]
+
+        reservoir_points[replacement_positions] = points_to_replace
+        reservoir_colors[replacement_positions] = colors_to_replace
+        reservoir_confs[replacement_positions] = confs_to_replace
+
+    return current_count + num_new_points, reservoir_points, reservoir_colors, reservoir_confs
+
 # Dependencies.py already injects deps_public/deps_da3/DA3_DIR into sys.path on addon import.
 # We import the streaming modules directly from the vendored repo folder.
 
@@ -799,7 +984,7 @@ class DA3_Modified_Streaming:
                 colors_first = chunk_data_first.processed_images
                 confs_first = chunk_data_first.conf
                 ply_path_first = os.path.join(self.pcd_dir, "0_pcd.ply")
-                save_confident_pointcloud_batch(
+                save_confident_pointcloud_batch_with_conf(
                     points=points_first,  # shape: (H, W, 3)
                     colors=colors_first,  # shape: (H, W, 3)
                     confs=confs_first,  # shape: (H, W)
@@ -816,7 +1001,7 @@ class DA3_Modified_Streaming:
             colors = (aligned_chunk_data["images"].reshape(-1, 3)).astype(np.uint8)
             confs = aligned_chunk_data["conf"].reshape(-1)
             ply_path = os.path.join(self.pcd_dir, f"{chunk_idx+1}_pcd.ply")
-            save_confident_pointcloud_batch(
+            save_confident_pointcloud_batch_with_conf(
                 points=points,  # shape: (H, W, 3)
                 colors=colors,  # shape: (H, W, 3)
                 confs=confs,  # shape: (H, W)

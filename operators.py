@@ -995,7 +995,10 @@ Loop:
                 cols = _np.ones((len(pts), 3), dtype=_np.float32)
             cols = _np.hstack((cols, _np.ones((len(pts), 1), dtype=_np.float32)))
 
-            confs = _np.ones((len(pts),), dtype=_np.float32)
+            if "confidence" in vertices.dtype.names:
+                confs = vertices["confidence"].astype(_np.float32)
+            else:
+                confs = _np.ones((len(pts),), dtype=_np.float32)
             obj_name = f"{folder_name}_StreamingCloud"
             create_point_cloud_object(obj_name, pts, cols, confs, collection=target_col)
         except Exception as e:
