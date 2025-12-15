@@ -993,6 +993,7 @@ class DA3_Modified_Streaming:
                     * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"],
                     sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
                 )
+                print(f"DEBUG: Saved first chunk PLY with confidence - min: {confs_first.min():.4f}, max: {confs_first.max():.4f}, mean: {confs_first.mean():.4f}, threshold: {np.mean(confs_first) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef']:.4f}")
                 if self.config["Model"]["save_depth_conf_result"]:
                     predictions = chunk_data_first
                     self.save_depth_conf_result(predictions, 0, 1, np.eye(3), np.array([0, 0, 0]))
@@ -1010,6 +1011,7 @@ class DA3_Modified_Streaming:
                 * self.config["Model"]["Pointcloud_Save"]["conf_threshold_coef"],
                 sample_ratio=self.config["Model"]["Pointcloud_Save"]["sample_ratio"],
             )
+            print(f"DEBUG: Saved chunk {chunk_idx+1} PLY with confidence - min: {confs.min():.4f}, max: {confs.max():.4f}, mean: {confs.mean():.4f}, threshold: {np.mean(confs) * self.config['Model']['Pointcloud_Save']['conf_threshold_coef']:.4f}")
 
             if self.config["Model"]["save_depth_conf_result"]:
                 predictions = chunk_data

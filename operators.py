@@ -997,8 +997,10 @@ Loop:
 
             if "confidence" in vertices.dtype.names:
                 confs = vertices["confidence"].astype(_np.float32)
+                print(f"DEBUG: Loaded confidence from PLY - min: {confs.min():.4f}, max: {confs.max():.4f}, mean: {confs.mean():.4f}")
             else:
                 confs = _np.ones((len(pts),), dtype=_np.float32)
+                print("DEBUG: No confidence in PLY, using all 1.0")
             obj_name = f"{folder_name}_StreamingCloud"
             create_point_cloud_object(obj_name, pts, cols, confs, collection=target_col)
         except Exception as e:
