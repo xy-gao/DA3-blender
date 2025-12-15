@@ -414,13 +414,15 @@ def remove_duplicates(data_list):
 
 # Based on DA3_Streaming from da3_streaming.py
 class DA3_Modified_Streaming:
-    def __init__(self, image_dir, save_dir, image_paths, config, model=None, progress_callback=None):
+    def __init__(self, image_dir, save_dir, image_paths, config, model=None, progress_callback=None, filter_edges=True):
         self.config = config
 
         # Optional UI progress callback: callable(progress_float 0-100, message) -> bool to request stop
         self.progress_callback = progress_callback
         self._progress_done = 0.0
         self._progress_total = 1.0
+
+        self.filter_edges = filter_edges
 
         if not image_paths:
             raise ValueError("image_paths must be a non-empty list of image files")
@@ -593,6 +595,10 @@ class DA3_Modified_Streaming:
                 print(predictions.extrinsics.shape)  # [N, 3, 4] float32 (w2c)
                 print(predictions.intrinsics.shape)  # [N, 3, 3] float32
         torch.cuda.empty_cache()
+
+        # Apply edge filtering to confidence values before saving
+        from .utils import apply_edge_filtering
+        apply_edge_filtering(predictions, self.filter_edges)
 
         # Save predictions to disk instead of keeping in memory
         if is_loop:
@@ -1197,6 +1203,7 @@ def run_streaming(
     depth_threshold: float = 15.0,
     save_debug: bool = False,
     conf_threshold_coef: float = 0.75,
+    filter_edges: bool = True,
 ) -> dict:
     if not os.path.isdir(image_dir):
         raise ValueError(f"Image directory does not exist: {image_dir}")
@@ -1220,6 +1227,7 @@ def run_streaming(
         config=config,
         model=model,
         progress_callback=progress_callback,
+        filter_edges=filter_edges,
     )
     da3_streaming.run()
     da3_streaming.close()

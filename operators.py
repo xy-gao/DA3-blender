@@ -1118,6 +1118,7 @@ Loop:
                         depth_threshold=self.streaming_depth_threshold,
                         save_debug=self.streaming_save_debug,
                         conf_threshold_coef=self.streaming_conf_threshold_coef,
+                        filter_edges=self.filter_edges,
                     )
                     self.result_queue.put({"type": "STREAMING_PLY", "path": res["combined_ply"], "folder_name": folder_name})
                     self.result_queue.put({"type": "DONE"})

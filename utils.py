@@ -965,31 +965,52 @@ def create_point_cloud_object(name, points, colors, confs, motions=None, collect
     add_point_cloud_geo_nodes(obj, mat)
     return obj
 
+def apply_edge_filtering(prediction, filter_edges=True):
+    """
+    Apply edge filtering to prediction confidence based on depth gradients.
+    Sets confidence to 0 for pixels with high depth gradient (edges).
+    
+    Args:
+        prediction: Prediction object with depth and conf attributes
+        filter_edges: Whether to apply filtering
+    """
+    if not filter_edges or not hasattr(prediction, 'depth') or prediction.depth is None:
+        return
+        
+    try:
+        import cv2
+        depth = prediction.depth
+        conf = prediction.conf
+        
+        for i in range(len(depth)):
+            dm = depth[i].astype(np.float32)  # Ensure float32 for OpenCV Sobel
+            gx = cv2.Sobel(dm, cv2.CV_64F, 1, 0, ksize=3)
+            gy = cv2.Sobel(dm, cv2.CV_64F, 0, 1, ksize=3)
+            mag = np.sqrt(gx**2 + gy**2)
+            mn, mx = np.nanmin(mag), np.nanmax(mag)
+            if mx > mn:
+                norm = (mag - mn) / (mx - mn)
+            else:
+                norm = np.zeros_like(mag)
+            
+            # Set confidence to 0 if normalized gradient >= 12/255
+            mask = norm >= (12.0 / 255.0)
+            conf[i][mask] = 0.0
+    except Exception as e:
+        print(f"Failed to filter confidence by gradient: {e}")
+
 def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5, global_indices=None):
+    # Apply edge filtering if requested
+    if isinstance(d, dict) and filter_edges:
+        # For dict format (legacy), apply filtering here
+        apply_edge_filtering(type('Prediction', (), d), filter_edges)
+    elif hasattr(d, 'depth') and hasattr(d, 'conf') and filter_edges:
+        # For prediction objects, apply filtering
+        apply_edge_filtering(d, filter_edges)
+    
     points = d["world_points_from_depth"]
     images = d["images"]
     conf = d["conf"]
-
-    # Filter confidence based on depth gradient
-    if filter_edges and "depth" in d:
-        try:
-            depth = d["depth"]
-            for i in range(len(depth)):
-                dm = depth[i].astype(np.float32)  # Ensure float32 for OpenCV Sobel
-                gx = cv2.Sobel(dm, cv2.CV_64F, 1, 0, ksize=3)
-                gy = cv2.Sobel(dm, cv2.CV_64F, 0, 1, ksize=3)
-                mag = np.sqrt(gx**2 + gy**2)
-                mn, mx = np.nanmin(mag), np.nanmax(mag)
-                if mx > mn:
-                    norm = (mag - mn) / (mx - mn)
-                else:
-                    norm = np.zeros_like(mag)
-                
-                # Set confidence to 0 if normalized gradient >= 12/255
-                mask = norm >= (12.0 / 255.0)
-                conf[i][mask] = 0.0
-        except Exception as e:
-            print(f"Failed to filter confidence by gradient: {e}")
 
     if 'seg_id_map' in d:
         seg_id_map = d['seg_id_map'] # [N, H, W]
