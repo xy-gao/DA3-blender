@@ -15,6 +15,30 @@ for p in (
     if p.exists() and p_str not in sys.path:
         sys.path.insert(0, p_str)
 
+# Provide a non-invasive runtime shim for Triton-backed alignment kernels.
+# If Triton isn't available (common on Windows or older GPUs), inject a
+# synthetic module `loop_utils.alignment_triton` that exposes the symbol
+# `robust_weighted_estimate_sim3_triton` and delegates to the PyTorch
+# implementation in `loop_utils.alignment_torch`.
+try:
+    import triton  # type: ignore
+except Exception:
+    import types as _types
+
+    _modname = "loop_utils.alignment_triton"
+    if _modname not in sys.modules:
+        _shim = _types.ModuleType(_modname)
+
+        def _robust_weighted_estimate_sim3_triton(*args, **kwargs):
+            # Import inside the wrapper so real module resolution happens
+            # after the addon has configured sys.path to include da3_repo.
+            from loop_utils.alignment_torch import robust_weighted_estimate_sim3_torch
+
+            return robust_weighted_estimate_sim3_torch(*args, **kwargs)
+
+        _shim.robust_weighted_estimate_sim3_triton = _robust_weighted_estimate_sim3_triton
+        sys.modules[_modname] = _shim
+
 import json
 
 import matplotlib
