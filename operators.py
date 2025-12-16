@@ -1022,6 +1022,54 @@ Loop:
                         import traceback
                         traceback.print_exc()
                         continue
+                # Try to import cameras produced by the streaming pipeline
+                try:
+                    output_dir = msg.get("output_dir") if msg.get("output_dir") else (os.path.dirname(pcd_dir) if pcd_dir else None)
+                    if output_dir:
+                        poses_path = os.path.join(output_dir, "camera_poses.txt")
+                        intrinsics_path = os.path.join(output_dir, "intrinsic.txt")
+                        if os.path.exists(poses_path) and os.path.exists(intrinsics_path):
+                            intrinsics = []
+                            extrinsics = []
+                            with open(poses_path, "r") as f:
+                                for line in f:
+                                    vals = [float(x) for x in line.strip().split() if x.strip()]
+                                    if len(vals) != 16:
+                                        continue
+                                    c2w = _np.array(vals, dtype=_np.float64).reshape((4, 4))
+                                    try:
+                                        w2c = _np.linalg.inv(c2w)
+                                    except Exception:
+                                        continue
+                                    extrinsics.append(w2c[:3, :4].astype(_np.float32))
+                            with open(intrinsics_path, "r") as f:
+                                for line in f:
+                                    parts = [p for p in line.strip().split() if p.strip()]
+                                    if len(parts) < 4:
+                                        continue
+                                    fx, fy, cx, cy = [float(x) for x in parts[:4]]
+                                    K = _np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=_np.float32)
+                                    intrinsics.append(K)
+
+                            if len(intrinsics) == len(extrinsics) and len(intrinsics) > 0:
+                                preds = {"intrinsic": intrinsics, "extrinsic": extrinsics}
+                                # Try to determine image size from available image paths
+                                image_paths = getattr(self, "image_paths", None)
+                                image_width = None
+                                image_height = None
+                                if image_paths and len(image_paths) > 0:
+                                    try:
+                                        import cv2 as _cv2
+                                        img = _cv2.imread(image_paths[0])
+                                        if img is not None:
+                                            image_height, image_width = img.shape[:2]
+                                            preds["image_paths"] = image_paths
+                                    except Exception:
+                                        pass
+                                create_cameras(preds, collection=target_parent, image_width=image_width, image_height=image_height)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
                 return {'FINISHED'}
 
             # Fallback: import combined PLY into single collection
