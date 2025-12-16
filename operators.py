@@ -1065,11 +1065,10 @@ Loop:
                                     if len(vals) != 16:
                                         continue
                                     c2w = _np.array(vals, dtype=_np.float64).reshape((4, 4))
-                                    try:
-                                        w2c = _np.linalg.inv(c2w)
-                                    except Exception:
-                                        continue
-                                    extrinsics.append(w2c[:3, :4].astype(_np.float32))
+                                    # The streaming pipeline saves camera poses as C2W (camera->world).
+                                    # `create_cameras` expects a 3x4 extrinsic in that same convention,
+                                    # so store the top 3 rows directly.
+                                    extrinsics.append(c2w[:3, :4].astype(_np.float32))
                             with open(intrinsics_path, "r") as f:
                                 for line in f:
                                     parts = [p for p in line.strip().split() if p.strip()]
