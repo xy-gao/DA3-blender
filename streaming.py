@@ -438,7 +438,7 @@ def remove_duplicates(data_list):
 
 # Based on DA3_Streaming from da3_streaming.py
 class DA3_Modified_Streaming:
-    def __init__(self, image_dir, save_dir, image_paths, config, model=None, progress_callback=None, filter_edges=True):
+    def __init__(self, image_dir, save_dir, image_paths, config, model=None, progress_callback=None, filter_edges=True, segmentation_data=None, segmentation_class_names=None):
         self.config = config
 
         # Optional UI progress callback: callable(progress_float 0-100, message) -> bool to request stop
@@ -502,6 +502,10 @@ class DA3_Modified_Streaming:
         self.skyseg_session = None
 
         self.chunk_indices = None  # [(begin_idx, end_idx), ...]
+
+        # Optional segmentation data precomputed by the caller (list per-image)
+        self.segmentation_data = segmentation_data
+        self.segmentation_class_names = segmentation_class_names
 
         self.loop_list = []  # e.g. [(1584, 139), ...]
 
@@ -644,6 +648,21 @@ class DA3_Modified_Streaming:
             self.all_camera_intrinsics.append((chunk_range, intrinsics))
 
         np.save(save_path, predictions)
+
+        # If segmentation results were provided by the caller, save the per-chunk slice
+        try:
+            if (
+                self.segmentation_data is not None
+                and not is_loop
+                and chunk_idx is not None
+            ):
+                # chunk_range defined earlier for this chunk
+                seg_slice = self.segmentation_data[chunk_range[0] : chunk_range[1]]
+                seg_save_path = os.path.join(save_dir, f"chunk_{chunk_idx}_seg.npy")
+                np.save(seg_save_path, seg_slice, allow_pickle=True)
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
         return predictions
 
@@ -1304,6 +1323,8 @@ def run_streaming(
     overlap: int,
     model=None,
     progress_callback=None,
+    segmentation_data=None,
+    segmentation_class_names=None,
     ref_view_strategy: str = "saddle_balanced",
     loop_enable: bool = True,
     use_db_ow: bool = False,
@@ -1337,6 +1358,8 @@ def run_streaming(
         model=model,
         progress_callback=progress_callback,
         filter_edges=filter_edges,
+        segmentation_data=segmentation_data,
+        segmentation_class_names=segmentation_class_names,
     )
     da3_streaming.run()
     da3_streaming.close()

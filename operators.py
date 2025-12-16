@@ -1018,6 +1018,34 @@ Loop:
 
                         obj_name = f"{chunk_col_name}_Cloud"
                         create_point_cloud_object(obj_name, pts, cols, confs, collection=chunk_col)
+                        # Try to load per-chunk segmentation if available and attach as a Blender text block
+                        try:
+                            output_dir = os.path.dirname(pcd_dir)
+                            seg_path_alt = os.path.join(output_dir, "_tmp_results_unaligned", f"chunk_{idx}_seg.npy")
+                            seg_path_orig = os.path.join(output_dir, "_tmp_results_unaligned", f"chunk_{idx}.npy")
+                            import json
+                            if os.path.exists(seg_path_alt):
+                                seg_obj = _np.load(seg_path_alt, allow_pickle=True)
+                                try:
+                                    txt_name = f"{chunk_col_name}_seg"
+                                    txt = bpy.data.texts.new(txt_name)
+                                    txt.from_string(json.dumps(seg_obj.tolist(), default=str))
+                                except Exception:
+                                    pass
+                            elif os.path.exists(seg_path_orig):
+                                try:
+                                    seg_try = _np.load(seg_path_orig, allow_pickle=True)
+                                    if hasattr(seg_try, 'item'):
+                                        val = seg_try.item()
+                                        if isinstance(val, dict) and 'segmentation' in val:
+                                            seg_obj = val['segmentation']
+                                            txt_name = f"{chunk_col_name}_seg"
+                                            txt = bpy.data.texts.new(txt_name)
+                                            txt.from_string(json.dumps(seg_obj, default=str))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                     except Exception:
                         import traceback
                         traceback.print_exc()
@@ -1215,6 +1243,8 @@ Loop:
                         save_debug=self.streaming_save_debug,
                         conf_threshold_coef=self.streaming_conf_threshold_coef,
                         filter_edges=self.filter_edges,
+                        segmentation_data=all_segmentation_data,
+                        segmentation_class_names=segmentation_class_names,
                     )
                     # Return both the combined PLY and the per-chunk PCD directory
                     self.result_queue.put({
