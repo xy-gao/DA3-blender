@@ -961,12 +961,14 @@ Loop:
             return
 
         combined_pcd = os.path.join(output_dir, "combined_pcd.ply")
+        pcd_dir = os.path.join(output_dir, "pcd")
         if not os.path.exists(combined_pcd):
             self.result_queue.put({"type": "ERROR", "message": "Streaming completed but combined_pcd.ply not found."})
             return
 
         self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
-        self.result_queue.put({"type": "STREAMING_PLY", "path": combined_pcd, "folder_name": folder_name})
+        # Provide both combined PLY and the directory containing per-chunk PLYs
+        self.result_queue.put({"type": "STREAMING_PLY", "path": combined_pcd, "pcd_dir": pcd_dir, "folder_name": folder_name})
         self.result_queue.put({"type": "DONE"})
 
     def _import_streaming_ply(self, context, msg):
@@ -977,6 +979,52 @@ Loop:
             folder_name = msg["folder_name"]
             ply_path = msg["path"]
 
+            # Optionally import per-chunk PLYs into separate collections
+            pcd_dir = msg.get("pcd_dir")
+            use_chunks = getattr(context.scene, "da3_streaming_chunk_collections", False) and pcd_dir and os.path.isdir(pcd_dir)
+
+            if use_chunks:
+                # Parent collection for this streaming run
+                target_parent = self.parent_col
+                if not target_parent:
+                    target_parent = bpy.data.collections.new(folder_name)
+                    context.scene.collection.children.link(target_parent)
+
+                # Load all .ply files in pcd_dir sorted by name
+                chunk_files = sorted([f for f in os.listdir(pcd_dir) if f.lower().endswith('.ply')])
+                for idx, fname in enumerate(chunk_files):
+                    chunk_path = os.path.join(pcd_dir, fname)
+                    try:
+                        plydata = PlyData.read(chunk_path)
+                        vertices = plydata["vertex"].data
+                        pts = _np.stack([vertices["x"], vertices["y"], vertices["z"]], axis=1).astype(_np.float32)
+                        pts[:, [0, 1, 2]] = pts[:, [0, 2, 1]]
+                        pts[:, 2] = -pts[:, 2]
+
+                        if {"red", "green", "blue"}.issubset(vertices.dtype.names):
+                            cols = _np.stack([vertices["red"], vertices["green"], vertices["blue"]], axis=1).astype(_np.float32) / 255.0
+                        else:
+                            cols = _np.ones((len(pts), 3), dtype=_np.float32)
+                        cols = _np.hstack((cols, _np.ones((len(pts), 1), dtype=_np.float32)))
+
+                        if "confidence" in vertices.dtype.names:
+                            confs = vertices["confidence"].astype(_np.float32)
+                        else:
+                            confs = _np.ones((len(pts),), dtype=_np.float32)
+
+                        chunk_col_name = f"{folder_name}_chunk_{idx}"
+                        chunk_col = bpy.data.collections.new(chunk_col_name)
+                        target_parent.children.link(chunk_col)
+
+                        obj_name = f"{chunk_col_name}_Cloud"
+                        create_point_cloud_object(obj_name, pts, cols, confs, collection=chunk_col)
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
+                        continue
+                return {'FINISHED'}
+
+            # Fallback: import combined PLY into single collection
             target_col = self.parent_col
             if not target_col:
                 target_col = bpy.data.collections.new(folder_name)
@@ -1120,7 +1168,13 @@ Loop:
                         conf_threshold_coef=self.streaming_conf_threshold_coef,
                         filter_edges=self.filter_edges,
                     )
-                    self.result_queue.put({"type": "STREAMING_PLY", "path": res["combined_ply"], "folder_name": folder_name})
+                    # Return both the combined PLY and the per-chunk PCD directory
+                    self.result_queue.put({
+                        "type": "STREAMING_PLY",
+                        "path": res["combined_ply"],
+                        "pcd_dir": res.get("pcd_dir"),
+                        "folder_name": folder_name,
+                    })
                     self.result_queue.put({"type": "DONE"})
                 except Exception as e:
                     import traceback

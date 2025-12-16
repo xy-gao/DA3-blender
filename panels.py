@@ -63,6 +63,7 @@ class DA3Panel(bpy.types.Panel):
             box.prop(scene, "da3_streaming_depth_threshold", text="Depth Threshold")
             box.prop(scene, "da3_streaming_conf_threshold_coef", text="Conf Threshold Coef")
             box.prop(scene, "da3_streaming_save_debug", text="Save Debug Info")
+            box.prop(scene, "da3_streaming_chunk_collections", text="Separate Chunk Collections")
         layout.prop(scene, "da3_use_ray_pose", text="Use Ray-based Pose")
         layout.prop(scene, "da3_filter_edges", text="Filter Edges")
         layout.prop(scene, "da3_min_confidence", text="Min Confidence")

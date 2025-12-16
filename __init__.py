@@ -301,6 +301,11 @@ def register_classes():
         min=0.0,
         max=1.0
     )
+    bpy.types.Scene.da3_streaming_chunk_collections = bpy.props.BoolProperty(
+        name="Separate Collections per Chunk",
+        description="Import each streaming chunk as its own Blender collection",
+        default=False,
+    )
     bpy.types.Scene.da3_batch_mode = bpy.props.EnumProperty(
         items=[
             ("ignore_batch_size", "Ignore Batch Size", "Process all images (may use excessive VRAM)"),
