@@ -1245,21 +1245,12 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
             scene.collection.objects.link(cam_obj)
         
         ext = predictions["extrinsic"][i]
-
-        # Ensure numpy array
-        ext_arr = _np.array(ext, dtype=_np.float64)
-
-        # Original behavior: treat `ext` as a 3x4 camera->world matrix (c2w)
-        # and convert it into Blender `matrix_world` with axis adjustments.
-        try:
-            E = _np.vstack((ext_arr, [0, 0, 0, 1]))
-            E_inv = _np.linalg.inv(E)
-            M = E_inv @ T
-            chosen = Matrix(M.tolist())
-            R = Matrix.Rotation(math.radians(-90), 4, 'X')
-            cam_obj.matrix_world = R @ chosen
-        except Exception:
-            cam_obj.matrix_world = Matrix.Identity(4)
+        E = np.vstack((ext, [0, 0, 0, 1]))
+        E_inv = np.linalg.inv(E)
+        M = np.dot(E_inv, T)
+        cam_obj.matrix_world = Matrix(M.tolist())
+        R = Matrix.Rotation(math.radians(-90), 4, 'X')
+        cam_obj.matrix_world = R @ cam_obj.matrix_world
 
 def get_or_create_image_material(image_path):
     name = os.path.basename(image_path)

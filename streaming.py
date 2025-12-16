@@ -615,7 +615,7 @@ class DA3_Modified_Streaming:
                 predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy)
 
                 predictions.depth = np.squeeze(predictions.depth)
-                predictions.conf -= 1.0
+                predictions.conf -= 1.0 # TODO: Add 1 back when passing results to Blender
 
                 print(predictions.processed_images.shape)  # [N, H, W, 3] uint8
                 print(predictions.depth.shape)  # [N, H, W] float32
@@ -627,6 +627,82 @@ class DA3_Modified_Streaming:
         # Apply edge filtering to confidence values before saving
         from .utils import apply_edge_filtering
         apply_edge_filtering(predictions, self.filter_edges)
+
+        # If segmentation results were provided by the caller, compute per-pixel seg_id_map
+        # for this chunk and optionally down-weight "person" pixels for alignment by
+        # clamping their confidence to the minimum confidence observed in this chunk.
+        segmaps_payload = None
+        try:
+            if (
+                self.segmentation_data is not None
+                and not is_loop
+                and chunk_idx is not None
+                and range_2 is None
+            ):
+                chunk_range = self.chunk_indices[chunk_idx]
+                seg_slice = self.segmentation_data[chunk_range[0] : chunk_range[1]]
+                N, H, W = predictions.depth.shape
+
+                try:
+                    import cv2
+                except Exception:
+                    cv2 = None
+
+                seg_id_map = np.full((N, H, W), -1, dtype=np.int32)
+                id_to_class = {}
+
+                if cv2 is not None:
+                    for i in range(N):
+                        if i >= len(seg_slice):
+                            break
+                        frame_seg = seg_slice[i] or {}
+                        masks = frame_seg.get("masks", [])
+                        ids = frame_seg.get("ids", [])
+                        classes = frame_seg.get("classes", [])
+                        if len(masks) == 0:
+                            continue
+                        for m_idx, mask in enumerate(masks):
+                            try:
+                                resized_mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_LINEAR)
+                                binary_mask = resized_mask > 0.5
+                            except Exception:
+                                continue
+                            obj_id = ids[m_idx] if len(ids) > m_idx else -1
+                            obj_cls = classes[m_idx] if len(classes) > m_idx else -1
+                            if obj_id != -1:
+                                id_to_class[int(obj_id)] = int(obj_cls)
+                                seg_id_map[i][binary_mask] = int(obj_id)
+
+                # Apply "person" confidence down-weighting for alignment
+                class_names = self.segmentation_class_names or {}
+                try:
+                    low_conf = float(np.nanmin(predictions.conf))
+                except Exception:
+                    low_conf = 0.0
+
+                # Find object IDs whose class name is 'person'
+                person_obj_ids = []
+                for obj_id, cls_id in id_to_class.items():
+                    name = class_names.get(cls_id, "")
+                    if isinstance(name, str) and name.strip().lower() == "person":
+                        person_obj_ids.append(obj_id)
+
+                if person_obj_ids:
+                    # Clamp person pixels to low_conf without increasing existing values
+                    for i in range(N):
+                        for obj_id in person_obj_ids:
+                            mask = seg_id_map[i] == obj_id
+                            if mask.any():
+                                predictions.conf[i][mask] = np.minimum(predictions.conf[i][mask], low_conf)
+
+                segmaps_payload = {
+                    "seg_id_map": seg_id_map,
+                    "id_to_class": id_to_class,
+                    "class_names": class_names,
+                }
+        except Exception:
+            import traceback
+            traceback.print_exc()
 
         # Save predictions to disk instead of keeping in memory
         if is_loop:
@@ -649,17 +725,11 @@ class DA3_Modified_Streaming:
 
         np.save(save_path, predictions)
 
-        # If segmentation results were provided by the caller, save the per-chunk slice
+        # Save segmaps payload (for Blender import) if available
         try:
-            if (
-                self.segmentation_data is not None
-                and not is_loop
-                and chunk_idx is not None
-            ):
-                # chunk_range defined earlier for this chunk
-                seg_slice = self.segmentation_data[chunk_range[0] : chunk_range[1]]
-                seg_save_path = os.path.join(save_dir, f"chunk_{chunk_idx}_seg.npy")
-                np.save(seg_save_path, seg_slice, allow_pickle=True)
+            if segmaps_payload is not None and not is_loop and chunk_idx is not None:
+                seg_save_path = os.path.join(save_dir, f"chunk_{chunk_idx}_segmaps.npy")
+                np.save(seg_save_path, segmaps_payload, allow_pickle=True)
         except Exception:
             import traceback
             traceback.print_exc()

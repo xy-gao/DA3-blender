@@ -983,6 +983,13 @@ Loop:
             pcd_dir = msg.get("pcd_dir")
             use_chunks = getattr(context.scene, "da3_streaming_chunk_collections", False) and pcd_dir and os.path.isdir(pcd_dir)
 
+            # If segmentation is enabled, import streaming results via the same
+            # code path as other batch modes (import_point_cloud/import_mesh_from_depth)
+            use_segmentation = bool(getattr(context.scene, "da3_use_segmentation", False))
+            generate_mesh = bool(getattr(context.scene, "da3_generate_mesh", False))
+            filter_edges = bool(getattr(context.scene, "da3_filter_edges", True))
+            min_confidence = float(getattr(context.scene, "da3_min_confidence", 0.5))
+
             if use_chunks:
                 # Parent collection for this streaming run
                 target_parent = self.parent_col
@@ -995,6 +1002,63 @@ Loop:
                 for idx, fname in enumerate(chunk_files):
                     chunk_path = os.path.join(pcd_dir, fname)
                     try:
+                        # Segmentation-enabled: load aligned chunk arrays and import like other batch modes
+                        if use_segmentation:
+                            output_dir = os.path.dirname(pcd_dir)
+                            aligned_dir = os.path.join(output_dir, "_tmp_results_aligned")
+                            unaligned_dir = os.path.join(output_dir, "_tmp_results_unaligned")
+                            aligned_path = os.path.join(aligned_dir, f"chunk_{idx}.npy")
+
+                            if not os.path.exists(aligned_path):
+                                # Fall back to PLY import if aligned chunk data isn't present
+                                raise FileNotFoundError(aligned_path)
+
+                            aligned_obj = _np.load(aligned_path, allow_pickle=True)
+                            aligned_data = aligned_obj.item() if hasattr(aligned_obj, 'item') else aligned_obj
+
+                            # Expect dict with world_points/conf/images
+                            points = aligned_data.get("world_points")
+                            images_u8 = aligned_data.get("images")
+                            conf = aligned_data.get("conf")
+                            if points is None or images_u8 is None or conf is None:
+                                raise ValueError("Aligned chunk data missing required keys")
+
+                            # Normalize images to 0..1 float like convert_prediction_to_dict
+                            images = images_u8.astype(_np.float32) / 255.0
+
+                            # Load segmaps (seg_id_map/id_to_class/class_names)
+                            segmaps_path = os.path.join(unaligned_dir, f"chunk_{idx}_segmaps.npy")
+                            seg_id_map = None
+                            id_to_class = {}
+                            class_names = {}
+                            if os.path.exists(segmaps_path):
+                                seg_obj = _np.load(segmaps_path, allow_pickle=True)
+                                seg_payload = seg_obj.item() if hasattr(seg_obj, 'item') else seg_obj
+                                seg_id_map = seg_payload.get("seg_id_map")
+                                id_to_class = seg_payload.get("id_to_class", {}) or {}
+                                class_names = seg_payload.get("class_names", {}) or {}
+
+                            d = {
+                                "world_points_from_depth": points,
+                                "images": images,
+                                "conf": conf,
+                            }
+                            if seg_id_map is not None:
+                                d["seg_id_map"] = seg_id_map
+                                d["id_to_class"] = id_to_class
+                                d["class_names"] = class_names
+
+                            chunk_col_name = f"{folder_name}_chunk_{idx}"
+                            chunk_col = bpy.data.collections.new(chunk_col_name)
+                            target_parent.children.link(chunk_col)
+
+                            if generate_mesh:
+                                import_mesh_from_depth(d, collection=chunk_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                            else:
+                                import_point_cloud(d, collection=chunk_col, filter_edges=filter_edges, min_confidence=min_confidence)
+
+                            continue
+
                         plydata = PlyData.read(chunk_path)
                         vertices = plydata["vertex"].data
                         pts = _np.stack([vertices["x"], vertices["y"], vertices["z"]], axis=1).astype(_np.float32)
@@ -1018,34 +1082,6 @@ Loop:
 
                         obj_name = f"{chunk_col_name}_Cloud"
                         create_point_cloud_object(obj_name, pts, cols, confs, collection=chunk_col)
-                        # Try to load per-chunk segmentation if available and attach as a Blender text block
-                        try:
-                            output_dir = os.path.dirname(pcd_dir)
-                            seg_path_alt = os.path.join(output_dir, "_tmp_results_unaligned", f"chunk_{idx}_seg.npy")
-                            seg_path_orig = os.path.join(output_dir, "_tmp_results_unaligned", f"chunk_{idx}.npy")
-                            import json
-                            if os.path.exists(seg_path_alt):
-                                seg_obj = _np.load(seg_path_alt, allow_pickle=True)
-                                try:
-                                    txt_name = f"{chunk_col_name}_seg"
-                                    txt = bpy.data.texts.new(txt_name)
-                                    txt.from_string(json.dumps(seg_obj.tolist(), default=str))
-                                except Exception:
-                                    pass
-                            elif os.path.exists(seg_path_orig):
-                                try:
-                                    seg_try = _np.load(seg_path_orig, allow_pickle=True)
-                                    if hasattr(seg_try, 'item'):
-                                        val = seg_try.item()
-                                        if isinstance(val, dict) and 'segmentation' in val:
-                                            seg_obj = val['segmentation']
-                                            txt_name = f"{chunk_col_name}_seg"
-                                            txt = bpy.data.texts.new(txt_name)
-                                            txt.from_string(json.dumps(seg_obj, default=str))
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
                     except Exception:
                         import traceback
                         traceback.print_exc()
