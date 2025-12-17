@@ -990,6 +990,151 @@ Loop:
             filter_edges = bool(getattr(context.scene, "da3_filter_edges", True))
             min_confidence = float(getattr(context.scene, "da3_min_confidence", 0.5))
 
+            def _try_import_streaming_cameras(_output_dir, _collection):
+                if not _output_dir or _collection is None:
+                    return False
+                poses_path = os.path.join(_output_dir, "camera_poses.txt")
+                intrinsics_path = os.path.join(_output_dir, "intrinsic.txt")
+                if not (os.path.exists(poses_path) and os.path.exists(intrinsics_path)):
+                    return False
+
+                intrinsics = []
+                extrinsics = []
+                with open(poses_path, "r") as f:
+                    for line in f:
+                        vals = [float(x) for x in line.strip().split() if x.strip()]
+                        if len(vals) != 16:
+                            continue
+                        c2w = _np.array(vals, dtype=_np.float64).reshape((4, 4))
+                        # The streaming pipeline saves camera poses as C2W (camera->world).
+                        # `create_cameras` expects W2C (world->camera), so invert.
+                        try:
+                            w2c = _np.linalg.inv(c2w)
+                        except Exception:
+                            continue
+                        extrinsics.append(w2c[:3, :4].astype(_np.float32))
+
+                with open(intrinsics_path, "r") as f:
+                    for line in f:
+                        parts = [p for p in line.strip().split() if p.strip()]
+                        if len(parts) < 4:
+                            continue
+                        fx, fy, cx, cy = [float(x) for x in parts[:4]]
+                        K = _np.array(
+                            [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+                            dtype=_np.float32,
+                        )
+                        intrinsics.append(K)
+
+                if len(intrinsics) != len(extrinsics) or len(intrinsics) == 0:
+                    return False
+
+                preds = {"intrinsic": intrinsics, "extrinsic": extrinsics}
+                image_paths = getattr(self, "image_paths", None)
+                image_width = None
+                image_height = None
+                if image_paths and len(image_paths) > 0:
+                    try:
+                        import cv2 as _cv2
+
+                        img = _cv2.imread(image_paths[0])
+                        if img is not None:
+                            image_height, image_width = img.shape[:2]
+                            preds["image_paths"] = image_paths
+                    except Exception:
+                        pass
+
+                create_cameras(preds, collection=_collection, image_width=image_width, image_height=image_height)
+                return True
+
+            # Segmentation parity path (non-chunk import): load persistent aligned chunk arrays
+            # from output_dir/segmented_chunks so temp cleanup doesn't break import.
+            if use_segmentation and not use_chunks:
+                output_dir = os.path.dirname(ply_path)
+                seg_dir = os.path.join(output_dir, "segmented_chunks")
+                if os.path.isdir(seg_dir):
+                    chunk_files = []
+                    for f in os.listdir(seg_dir):
+                        if not (f.startswith("chunk_") and f.lower().endswith(".npy")):
+                            continue
+                        if f.endswith("_segmaps.npy"):
+                            continue
+                        try:
+                            idx = int(f[len("chunk_") : -len(".npy")])
+                        except Exception:
+                            continue
+                        chunk_files.append((idx, f))
+
+                    if chunk_files:
+                        chunk_files.sort(key=lambda t: t[0])
+                        points_list = []
+                        images_list = []
+                        conf_list = []
+                        seg_id_list = []
+                        id_to_class = {}
+                        class_names = {}
+
+                        for _, fname in chunk_files:
+                            seg_chunk_path = os.path.join(seg_dir, fname)
+                            seg_chunk_obj = _np.load(seg_chunk_path, allow_pickle=True)
+                            seg_chunk = seg_chunk_obj.item() if hasattr(seg_chunk_obj, 'item') else seg_chunk_obj
+                            if not isinstance(seg_chunk, dict):
+                                continue
+
+                            points = seg_chunk.get("world_points")
+                            images_u8 = seg_chunk.get("images")
+                            conf = seg_chunk.get("conf")
+                            if points is None or images_u8 is None or conf is None:
+                                continue
+
+                            points_list.append(points)
+                            images_list.append(images_u8.astype(_np.float32) / 255.0)
+                            conf_list.append(conf)
+
+                            seg_id_map = seg_chunk.get("seg_id_map")
+                            if seg_id_map is not None:
+                                seg_id_list.append(seg_id_map)
+
+                            # Merge maps conservatively
+                            for k, v in (seg_chunk.get("id_to_class") or {}).items():
+                                if k not in id_to_class:
+                                    id_to_class[k] = v
+                            if not class_names:
+                                class_names = seg_chunk.get("class_names") or {}
+
+                        if points_list and images_list and conf_list:
+                            points_all = _np.concatenate(points_list, axis=0)
+                            images_all = _np.concatenate(images_list, axis=0)
+                            conf_all = _np.concatenate(conf_list, axis=0)
+
+                            d = {
+                                "world_points_from_depth": points_all,
+                                "images": images_all,
+                                "conf": conf_all,
+                            }
+                            if seg_id_list:
+                                try:
+                                    d["seg_id_map"] = _np.concatenate(seg_id_list, axis=0)
+                                except Exception:
+                                    pass
+                                d["id_to_class"] = id_to_class
+                                d["class_names"] = class_names
+
+                            target_col = self.parent_col
+                            if not target_col:
+                                target_col = bpy.data.collections.new(folder_name)
+                                context.scene.collection.children.link(target_col)
+
+                            if generate_mesh:
+                                import_mesh_from_depth(d, collection=target_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                            else:
+                                import_point_cloud(d, collection=target_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                            try:
+                                _try_import_streaming_cameras(output_dir, target_col)
+                            except Exception:
+                                pass
+                            return {'FINISHED'}
+
             if use_chunks:
                 # Parent collection for this streaming run
                 target_parent = self.parent_col
@@ -1005,59 +1150,43 @@ Loop:
                         # Segmentation-enabled: load aligned chunk arrays and import like other batch modes
                         if use_segmentation:
                             output_dir = os.path.dirname(pcd_dir)
-                            aligned_dir = os.path.join(output_dir, "_tmp_results_aligned")
-                            unaligned_dir = os.path.join(output_dir, "_tmp_results_unaligned")
-                            aligned_path = os.path.join(aligned_dir, f"chunk_{idx}.npy")
+                            seg_dir = os.path.join(output_dir, "segmented_chunks")
+                            seg_chunk_path = os.path.join(seg_dir, f"chunk_{idx}.npy")
 
-                            if not os.path.exists(aligned_path):
-                                # Fall back to PLY import if aligned chunk data isn't present
-                                raise FileNotFoundError(aligned_path)
+                            if os.path.exists(seg_chunk_path):
+                                seg_chunk_obj = _np.load(seg_chunk_path, allow_pickle=True)
+                                seg_chunk = seg_chunk_obj.item() if hasattr(seg_chunk_obj, 'item') else seg_chunk_obj
 
-                            aligned_obj = _np.load(aligned_path, allow_pickle=True)
-                            aligned_data = aligned_obj.item() if hasattr(aligned_obj, 'item') else aligned_obj
+                                # Expect dict with world_points/conf/images; may also include segmaps
+                                points = seg_chunk.get("world_points")
+                                images_u8 = seg_chunk.get("images")
+                                conf = seg_chunk.get("conf")
+                                if points is None or images_u8 is None or conf is None:
+                                    raise ValueError("Segmented chunk data missing required keys")
 
-                            # Expect dict with world_points/conf/images
-                            points = aligned_data.get("world_points")
-                            images_u8 = aligned_data.get("images")
-                            conf = aligned_data.get("conf")
-                            if points is None or images_u8 is None or conf is None:
-                                raise ValueError("Aligned chunk data missing required keys")
+                                images = images_u8.astype(_np.float32) / 255.0
 
-                            # Normalize images to 0..1 float like convert_prediction_to_dict
-                            images = images_u8.astype(_np.float32) / 255.0
+                                d = {
+                                    "world_points_from_depth": points,
+                                    "images": images,
+                                    "conf": conf,
+                                }
 
-                            # Load segmaps (seg_id_map/id_to_class/class_names)
-                            segmaps_path = os.path.join(unaligned_dir, f"chunk_{idx}_segmaps.npy")
-                            seg_id_map = None
-                            id_to_class = {}
-                            class_names = {}
-                            if os.path.exists(segmaps_path):
-                                seg_obj = _np.load(segmaps_path, allow_pickle=True)
-                                seg_payload = seg_obj.item() if hasattr(seg_obj, 'item') else seg_obj
-                                seg_id_map = seg_payload.get("seg_id_map")
-                                id_to_class = seg_payload.get("id_to_class", {}) or {}
-                                class_names = seg_payload.get("class_names", {}) or {}
+                                if "seg_id_map" in seg_chunk and seg_chunk["seg_id_map"] is not None:
+                                    d["seg_id_map"] = seg_chunk["seg_id_map"]
+                                    d["id_to_class"] = seg_chunk.get("id_to_class", {}) or {}
+                                    d["class_names"] = seg_chunk.get("class_names", {}) or {}
 
-                            d = {
-                                "world_points_from_depth": points,
-                                "images": images,
-                                "conf": conf,
-                            }
-                            if seg_id_map is not None:
-                                d["seg_id_map"] = seg_id_map
-                                d["id_to_class"] = id_to_class
-                                d["class_names"] = class_names
+                                chunk_col_name = f"{folder_name}_chunk_{idx}"
+                                chunk_col = bpy.data.collections.new(chunk_col_name)
+                                target_parent.children.link(chunk_col)
 
-                            chunk_col_name = f"{folder_name}_chunk_{idx}"
-                            chunk_col = bpy.data.collections.new(chunk_col_name)
-                            target_parent.children.link(chunk_col)
+                                if generate_mesh:
+                                    import_mesh_from_depth(d, collection=chunk_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                                else:
+                                    import_point_cloud(d, collection=chunk_col, filter_edges=filter_edges, min_confidence=min_confidence)
 
-                            if generate_mesh:
-                                import_mesh_from_depth(d, collection=chunk_col, filter_edges=filter_edges, min_confidence=min_confidence)
-                            else:
-                                import_point_cloud(d, collection=chunk_col, filter_edges=filter_edges, min_confidence=min_confidence)
-
-                            continue
+                                continue
 
                         plydata = PlyData.read(chunk_path)
                         vertices = plydata["vertex"].data
@@ -1086,50 +1215,9 @@ Loop:
                         import traceback
                         traceback.print_exc()
                         continue
-                # Try to import cameras produced by the streaming pipeline
                 try:
                     output_dir = msg.get("output_dir") if msg.get("output_dir") else (os.path.dirname(pcd_dir) if pcd_dir else None)
-                    if output_dir:
-                        poses_path = os.path.join(output_dir, "camera_poses.txt")
-                        intrinsics_path = os.path.join(output_dir, "intrinsic.txt")
-                        if os.path.exists(poses_path) and os.path.exists(intrinsics_path):
-                            intrinsics = []
-                            extrinsics = []
-                            with open(poses_path, "r") as f:
-                                for line in f:
-                                    vals = [float(x) for x in line.strip().split() if x.strip()]
-                                    if len(vals) != 16:
-                                        continue
-                                    c2w = _np.array(vals, dtype=_np.float64).reshape((4, 4))
-                                    # The streaming pipeline saves camera poses as C2W (camera->world).
-                                    # `create_cameras` expects a 3x4 extrinsic in that same convention,
-                                    # so store the top 3 rows directly.
-                                    extrinsics.append(c2w[:3, :4].astype(_np.float32))
-                            with open(intrinsics_path, "r") as f:
-                                for line in f:
-                                    parts = [p for p in line.strip().split() if p.strip()]
-                                    if len(parts) < 4:
-                                        continue
-                                    fx, fy, cx, cy = [float(x) for x in parts[:4]]
-                                    K = _np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=_np.float32)
-                                    intrinsics.append(K)
-
-                            if len(intrinsics) == len(extrinsics) and len(intrinsics) > 0:
-                                preds = {"intrinsic": intrinsics, "extrinsic": extrinsics}
-                                # Try to determine image size from available image paths
-                                image_paths = getattr(self, "image_paths", None)
-                                image_width = None
-                                image_height = None
-                                if image_paths and len(image_paths) > 0:
-                                    try:
-                                        import cv2 as _cv2
-                                        img = _cv2.imread(image_paths[0])
-                                        if img is not None:
-                                            image_height, image_width = img.shape[:2]
-                                            preds["image_paths"] = image_paths
-                                    except Exception:
-                                        pass
-                                create_cameras(preds, collection=target_parent, image_width=image_width, image_height=image_height)
+                    _try_import_streaming_cameras(output_dir, target_parent)
                 except Exception:
                     import traceback
                     traceback.print_exc()
@@ -1162,6 +1250,10 @@ Loop:
                 print("DEBUG: No confidence in PLY, using all 1.0")
             obj_name = f"{folder_name}_StreamingCloud"
             create_point_cloud_object(obj_name, pts, cols, confs, collection=target_col)
+            try:
+                _try_import_streaming_cameras(os.path.dirname(ply_path), target_col)
+            except Exception:
+                pass
         except Exception as e:
             import traceback
             traceback.print_exc()

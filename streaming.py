@@ -473,10 +473,13 @@ class DA3_Modified_Streaming:
         self.result_aligned_dir = os.path.join(save_dir, "_tmp_results_aligned")
         self.result_loop_dir = os.path.join(save_dir, "_tmp_results_loop")
         self.result_output_dir = os.path.join(save_dir, "results_output")
+        # Persistent per-chunk outputs for Blender import (not deleted by close())
+        self.result_segmented_dir = os.path.join(save_dir, "segmented_chunks")
         self.pcd_dir = os.path.join(save_dir, "pcd")
         os.makedirs(self.result_unaligned_dir, exist_ok=True)
         os.makedirs(self.result_aligned_dir, exist_ok=True)
         os.makedirs(self.result_loop_dir, exist_ok=True)
+        os.makedirs(self.result_segmented_dir, exist_ok=True)
         os.makedirs(self.pcd_dir, exist_ok=True)
 
         self.all_camera_poses = []
@@ -728,7 +731,8 @@ class DA3_Modified_Streaming:
         # Save segmaps payload (for Blender import) if available
         try:
             if segmaps_payload is not None and not is_loop and chunk_idx is not None:
-                seg_save_path = os.path.join(save_dir, f"chunk_{chunk_idx}_segmaps.npy")
+                # Persist outside temp dirs so it survives close() cleanup
+                seg_save_path = os.path.join(self.result_segmented_dir, f"chunk_{chunk_idx}_segmaps.npy")
                 np.save(seg_save_path, segmaps_payload, allow_pickle=True)
         except Exception:
             import traceback
@@ -1090,6 +1094,24 @@ class DA3_Modified_Streaming:
             aligned_path = os.path.join(self.result_aligned_dir, f"chunk_{chunk_idx+1}.npy")
             np.save(aligned_path, aligned_chunk_data)
 
+            # Persist aligned chunk data + segmaps for Blender import
+            try:
+                if self.segmentation_data is not None:
+                    segmaps_path = os.path.join(self.result_segmented_dir, f"chunk_{chunk_idx+1}_segmaps.npy")
+                    if os.path.exists(segmaps_path):
+                        seg_obj = np.load(segmaps_path, allow_pickle=True)
+                        seg_payload = seg_obj.item() if hasattr(seg_obj, 'item') else seg_obj
+                        if isinstance(seg_payload, dict):
+                            aligned_chunk_data["seg_id_map"] = seg_payload.get("seg_id_map")
+                            aligned_chunk_data["id_to_class"] = seg_payload.get("id_to_class", {})
+                            aligned_chunk_data["class_names"] = seg_payload.get("class_names", {})
+
+                    persist_path = os.path.join(self.result_segmented_dir, f"chunk_{chunk_idx+1}.npy")
+                    np.save(persist_path, aligned_chunk_data, allow_pickle=True)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+
             if chunk_idx == 0:
                 chunk_data_first = np.load(
                     os.path.join(self.result_unaligned_dir, "chunk_0.npy"), allow_pickle=True
@@ -1116,6 +1138,27 @@ class DA3_Modified_Streaming:
                 if self.config["Model"]["save_depth_conf_result"]:
                     predictions = chunk_data_first
                     self.save_depth_conf_result(predictions, 0, 1, np.eye(3), np.array([0, 0, 0]))
+
+                # Persist first chunk data for Blender import
+                try:
+                    if self.segmentation_data is not None:
+                        first_payload = {
+                            "world_points": points_first,
+                            "conf": confs_first,
+                            "images": chunk_data_first.processed_images,
+                        }
+                        segmaps_path0 = os.path.join(self.result_segmented_dir, "chunk_0_segmaps.npy")
+                        if os.path.exists(segmaps_path0):
+                            seg_obj0 = np.load(segmaps_path0, allow_pickle=True)
+                            seg_payload0 = seg_obj0.item() if hasattr(seg_obj0, 'item') else seg_obj0
+                            if isinstance(seg_payload0, dict):
+                                first_payload["seg_id_map"] = seg_payload0.get("seg_id_map")
+                                first_payload["id_to_class"] = seg_payload0.get("id_to_class", {})
+                                first_payload["class_names"] = seg_payload0.get("class_names", {})
+                        np.save(os.path.join(self.result_segmented_dir, "chunk_0.npy"), first_payload, allow_pickle=True)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
 
             points = aligned_chunk_data["world_points"].reshape(-1, 3)
             colors = (aligned_chunk_data["images"].reshape(-1, 3)).astype(np.uint8)
