@@ -965,7 +965,7 @@ def create_point_cloud_object(name, points, colors, confs, motions=None, collect
     add_point_cloud_geo_nodes(obj, mat)
     return obj
 
-def apply_edge_filtering(prediction, filter_edges=True):
+def apply_edge_filtering(prediction, filter_edges=True, edge_confidence=0.0):
     """
     Apply edge filtering to prediction confidence based on depth gradients.
     Sets confidence to 0 for pixels with high depth gradient (edges).
@@ -995,7 +995,7 @@ def apply_edge_filtering(prediction, filter_edges=True):
             
             # Set confidence to 0 if normalized gradient >= 12/255
             mask = norm >= (12.0 / 255.0)
-            conf[i][mask] = 0.0
+            conf[i][mask] = edge_confidence
     except Exception as e:
         print(f"Failed to filter confidence by gradient: {e}")
 

@@ -1086,6 +1086,7 @@ Loop:
                             conf = seg_chunk.get("conf")
                             if points is None or images_u8 is None or conf is None:
                                 continue
+                            conf += 1.0
 
                             points_list.append(points)
                             images_list.append(images_u8.astype(_np.float32) / 255.0)
@@ -1163,6 +1164,7 @@ Loop:
                                 conf = seg_chunk.get("conf")
                                 if points is None or images_u8 is None or conf is None:
                                     raise ValueError("Segmented chunk data missing required keys")
+                                conf += 1.0
 
                                 images = images_u8.astype(_np.float32) / 255.0
 
@@ -1202,6 +1204,7 @@ Loop:
 
                         if "confidence" in vertices.dtype.names:
                             confs = vertices["confidence"].astype(_np.float32)
+                            confs += 1.0
                         else:
                             confs = _np.ones((len(pts),), dtype=_np.float32)
 
@@ -1244,6 +1247,7 @@ Loop:
 
             if "confidence" in vertices.dtype.names:
                 confs = vertices["confidence"].astype(_np.float32)
+                confs += 1.0                            
                 print(f"DEBUG: Loaded confidence from PLY - min: {confs.min():.4f}, max: {confs.max():.4f}, mean: {confs.mean():.4f}")
             else:
                 confs = _np.ones((len(pts),), dtype=_np.float32)

@@ -629,7 +629,7 @@ class DA3_Modified_Streaming:
 
         # Apply edge filtering to confidence values before saving
         from .utils import apply_edge_filtering
-        apply_edge_filtering(predictions, self.filter_edges)
+        apply_edge_filtering(predictions, self.filter_edges, -1.0)
 
         # If segmentation results were provided by the caller, compute per-pixel seg_id_map
         # for this chunk and optionally down-weight "person" pixels for alignment by
@@ -678,10 +678,7 @@ class DA3_Modified_Streaming:
 
                 # Apply "person" confidence down-weighting for alignment
                 class_names = self.segmentation_class_names or {}
-                try:
-                    low_conf = float(np.nanmin(predictions.conf))
-                except Exception:
-                    low_conf = 0.0
+                low_conf = 0.0
 
                 # Find object IDs whose class name is 'person'
                 person_obj_ids = []
