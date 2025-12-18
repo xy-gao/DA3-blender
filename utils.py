@@ -1220,9 +1220,11 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
     T = np.diag([1.0, -1.0, -1.0, 1.0])
     for i in range(num_cameras):
         # Name from image file if available
+        image_path_i = None
         if image_paths and i < len(image_paths):
             import os
-            base_name = os.path.splitext(os.path.basename(image_paths[i]))[0]
+            image_path_i = image_paths[i]
+            base_name = os.path.splitext(os.path.basename(image_path_i))[0]
             cam_name = base_name
         else:
             cam_name = f"Camera_{i}"
@@ -1245,6 +1247,32 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
             scene.collection.objects.link(cam_obj)
         
         ext = predictions["extrinsic"][i]
+
+        # Debug print: filename + intrinsics/extrinsics per camera
+        try:
+            K_dbg = np.asarray(K, dtype=np.float64)
+            ext_dbg = np.asarray(ext, dtype=np.float64)
+            K_str = np.array2string(K_dbg, precision=6, suppress_small=False)
+            ext_str = np.array2string(ext_dbg, precision=6, suppress_small=False)
+            print(
+                "[DA3] Camera {idx}: name={name} file={file} img={w}x{h} lens={lens:.6f} shift=({sx:.6f},{sy:.6f})\n"
+                "  K={K}\n"
+                "  extrinsic_w2c_3x4={E}".format(
+                    idx=i,
+                    name=cam_name,
+                    file=(image_path_i if image_path_i is not None else "<none>"),
+                    w=image_width,
+                    h=image_height,
+                    lens=float(cam_data.lens),
+                    sx=float(cam_data.shift_x),
+                    sy=float(cam_data.shift_y),
+                    K=K_str,
+                    E=ext_str,
+                )
+            )
+        except Exception as _e:
+            print(f"[DA3] Camera {i}: debug print failed: {_e}")
+
         E = np.vstack((ext, [0, 0, 0, 1]))
         E_inv = np.linalg.inv(E)
         M = np.dot(E_inv, T)
