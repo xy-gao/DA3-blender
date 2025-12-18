@@ -166,6 +166,24 @@ def register_classes():
     bpy.utils.register_class(operators.UnloadModelOperator)
     bpy.utils.register_class(operators.GeneratePointCloudOperator)
     bpy.utils.register_class(panels.DA3Panel)
+
+    # UI state (collapsible sections)
+    bpy.types.Scene.da3_ui_model_open = bpy.props.BoolProperty(
+        name="Model",
+        description="Show/hide model options",
+        default=True,
+    )
+    bpy.types.Scene.da3_ui_batch_open = bpy.props.BoolProperty(
+        name="Batch",
+        description="Show/hide batch options",
+        default=True,
+    )
+    bpy.types.Scene.da3_ui_seg_motion_open = bpy.props.BoolProperty(
+        name="Segmentation & Motion",
+        description="Show/hide segmentation and motion options",
+        default=True,
+    )
+
     bpy.types.Scene.da3_input_folder = bpy.props.StringProperty(subtype='DIR_PATH')
     bpy.types.Scene.da3_streaming_output = bpy.props.StringProperty(
         name="Output",
@@ -404,6 +422,9 @@ def unregister_classes():
     bpy.utils.unregister_class(operators.UnloadModelOperator)
     bpy.utils.unregister_class(operators.GeneratePointCloudOperator)
     bpy.utils.unregister_class(panels.DA3Panel)
+    del bpy.types.Scene.da3_ui_model_open
+    del bpy.types.Scene.da3_ui_batch_open
+    del bpy.types.Scene.da3_ui_seg_motion_open
     del bpy.types.Scene.da3_input_folder
     del bpy.types.Scene.da3_streaming_output
     del bpy.types.Scene.da3_streaming_advanced_open
