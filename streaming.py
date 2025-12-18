@@ -364,22 +364,18 @@ def depth_to_point_cloud_vectorized(depth, intrinsics, extrinsics, device=None):
     extrinsics: [N, 3, 4] (w2c) numpy array or torch tensor
     Returns: point_cloud_world: [N, H, W, 3] same type as input
     """
-    input_is_numpy = False
-    if isinstance(depth, np.ndarray):
-        input_is_numpy = True
+    def _to_torch(x):
+        if torch.is_tensor(x):
+            return x
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x)
+        return torch.tensor(x)
 
-        depth_tensor = torch.tensor(depth, dtype=torch.float32)
-        intrinsics_tensor = torch.tensor(intrinsics, dtype=torch.float32)
-        extrinsics_tensor = torch.tensor(extrinsics, dtype=torch.float32)
+    input_is_numpy = isinstance(depth, np.ndarray) or isinstance(intrinsics, np.ndarray) or isinstance(extrinsics, np.ndarray)
 
-        if device is not None:
-            depth_tensor = depth_tensor.to(device)
-            intrinsics_tensor = intrinsics_tensor.to(device)
-            extrinsics_tensor = extrinsics_tensor.to(device)
-    else:
-        depth_tensor = depth
-        intrinsics_tensor = intrinsics
-        extrinsics_tensor = extrinsics
+    depth_tensor = _to_torch(depth).to(dtype=torch.float32)
+    intrinsics_tensor = _to_torch(intrinsics).to(dtype=torch.float32)
+    extrinsics_tensor = _to_torch(extrinsics).to(dtype=torch.float32)
 
     if device is not None:
         depth_tensor = depth_tensor.to(device)
@@ -438,7 +434,7 @@ def remove_duplicates(data_list):
 
 # Based on DA3_Streaming from da3_streaming.py
 class DA3_Modified_Streaming:
-     def __init__(
+    def __init__(
         self,
         image_dir,
         save_dir,
@@ -634,29 +630,43 @@ class DA3_Modified_Streaming:
 
                 predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy)
 
-                # Normalize shapes to the expected [N, ...] convention.
+                def _as_numpy(x, dtype=None):
+                    if x is None:
+                        return None
+                    if torch.is_tensor(x):
+                        x = x.detach().cpu().numpy()
+                    else:
+                        x = np.asarray(x)
+                    if dtype is not None:
+                        x = x.astype(dtype, copy=False)
+                    return x
+
+                # Normalize types/shapes to numpy arrays with expected [N, ...] convention.
+                predictions.depth = _as_numpy(predictions.depth, np.float32)
                 predictions.depth = np.squeeze(predictions.depth)
-                if getattr(predictions.depth, "ndim", 0) == 2:
+                if predictions.depth.ndim == 2:
                     predictions.depth = predictions.depth[None, ...]
 
+                predictions.conf = _as_numpy(predictions.conf, np.float32)
                 predictions.conf = np.squeeze(predictions.conf)
-                if getattr(predictions.conf, "ndim", 0) == 2:
+                if predictions.conf.ndim == 2:
                     predictions.conf = predictions.conf[None, ...]
                 predictions.conf -= 1.0  # TODO: Add 1 back when passing results to Blender
 
                 if hasattr(predictions, "extrinsics") and predictions.extrinsics is not None:
-                    predictions.extrinsics = np.array(predictions.extrinsics, copy=False)
+                    predictions.extrinsics = _as_numpy(predictions.extrinsics, np.float32)
                     if predictions.extrinsics.ndim == 2:
                         predictions.extrinsics = predictions.extrinsics[None, ...]
 
                 if hasattr(predictions, "intrinsics") and predictions.intrinsics is not None:
-                    predictions.intrinsics = np.array(predictions.intrinsics, copy=False)
+                    predictions.intrinsics = _as_numpy(predictions.intrinsics, np.float32)
                     if predictions.intrinsics.ndim == 2:
                         predictions.intrinsics = predictions.intrinsics[None, ...]
 
                 if hasattr(predictions, "sky") and predictions.sky is not None:
+                    predictions.sky = _as_numpy(predictions.sky, np.float32)
                     predictions.sky = np.squeeze(predictions.sky)
-                    if getattr(predictions.sky, "ndim", 0) == 2:
+                    if predictions.sky.ndim == 2:
                         predictions.sky = predictions.sky[None, ...]
 
                 # If the caller provided a metric prediction for the first chunk, compute
@@ -674,16 +684,26 @@ class DA3_Modified_Streaming:
 
                         mp = self.metric_first_chunk_prediction
                         if hasattr(mp, "depth"):
+                            mp.depth = _as_numpy(mp.depth, np.float32)
                             mp.depth = np.squeeze(mp.depth)
-                            if getattr(mp.depth, "ndim", 0) == 2:
+                            if mp.depth.ndim == 2:
                                 mp.depth = mp.depth[None, ...]
                         if hasattr(mp, "sky") and mp.sky is not None:
+                            mp.sky = _as_numpy(mp.sky, np.float32)
                             mp.sky = np.squeeze(mp.sky)
-                            if getattr(mp.sky, "ndim", 0) == 2:
+                            if mp.sky.ndim == 2:
                                 mp.sky = mp.sky[None, ...]
 
                         scaled_list = combine_base_and_metric([predictions], [mp])
-                        self.metric_scale_factor = float(getattr(scaled_list[0], "scale_factor", 1.0))
+                        scaled_pred = scaled_list[0]
+                        self.metric_scale_factor = float(getattr(scaled_pred, "scale_factor", 1.0))
+
+                        # combine_base_and_metric returns torch tensors for depth/extrinsics.
+                        # Convert back to numpy to keep the streaming pipeline consistent.
+                        predictions.depth = _as_numpy(getattr(scaled_pred, "depth", predictions.depth), np.float32)
+                        if hasattr(scaled_pred, "extrinsics") and scaled_pred.extrinsics is not None:
+                            predictions.extrinsics = _as_numpy(scaled_pred.extrinsics, np.float32)
+
                         print(f"[da3_streaming] Metric scale factor: {self.metric_scale_factor:.6f}")
                     except Exception as e:
                         print(f"[da3_streaming] Warning: failed to compute metric scale from first chunk: {e}")
@@ -697,8 +717,9 @@ class DA3_Modified_Streaming:
                     chunk_idx == 0 and range_2 is None and not is_loop
                 ):
                     try:
-                        predictions.depth = predictions.depth * self.metric_scale_factor
+                        predictions.depth = np.asarray(predictions.depth, dtype=np.float32) * self.metric_scale_factor
                         if hasattr(predictions, "extrinsics") and predictions.extrinsics is not None:
+                            predictions.extrinsics = np.asarray(predictions.extrinsics, dtype=np.float32)
                             predictions.extrinsics[..., 3] = predictions.extrinsics[..., 3] * self.metric_scale_factor
                     except Exception:
                         import traceback
