@@ -413,11 +413,14 @@ def unload_current_model():
     global model, current_model_name, current_model_load_half
     if model is not None:
         display_VRAM_usage("before unload")
-        # Drop references so PyTorch can free memory
-        del model
+        # Drop references so PyTorch can free memory.
+        # Avoid `del model` on the global name: other threads (e.g. UI poll)
+        # may read `model` concurrently and would hit NameError.
+        old_model = model
         model = None
         current_model_name = None
         current_model_load_half = None
+        del old_model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             display_VRAM_usage("after unload")
