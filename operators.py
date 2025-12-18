@@ -1351,13 +1351,38 @@ Loop:
             folder_name = os.path.basename(os.path.normpath(self.input_folder))
             self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
 
-            # 1) run base model
-            self.update_progress_timer(0, f"Loading {self.base_model_name} model...")
-            base_model = get_model(self.base_model_name, load_half=self.load_half_precision_model)
-            self.update_progress_timer(LoadModelTime, "Loaded base model")
-            print("Running base model inference...")
+            # 1) run base model (or streaming pipeline)
             if self.batch_mode == "da3_streaming":
                 try:
+                    metric_first_chunk_prediction = None
+                    if self.use_metric:
+                        metric_model_name = "da3metric-large"
+                        metric_path = get_model_path(metric_model_name, context)
+                        if not os.path.exists(metric_path):
+                            print("Metric model not downloaded; streaming will run without metric scale.")
+                        else:
+                            # Run the metric model FIRST (before we ever load the base model),
+                            # and pass its first-chunk prediction into the streaming runner.
+                            # The streaming pipeline will compute scale after the first base chunk
+                            # without re-running that base chunk.
+                            sample_n = max(1, int(self.batch_size))
+                            sample_paths = self.image_paths[: min(sample_n, len(self.image_paths))]
+
+                            print("Running metric model on first chunk to compute scale later...")
+                            unload_current_model()
+                            metric_model = get_model(metric_model_name, load_half=self.load_half_precision_model)
+                            with torch.no_grad():
+                                metric_first_chunk_prediction = metric_model.inference(
+                                    sample_paths,
+                                    ref_view_strategy=self.ref_view_strategy,
+                                )
+                            metric_model = None
+                            unload_current_model()
+
+                    self.update_progress_timer(0, f"Loading {self.base_model_name} model...")
+                    base_model = get_model(self.base_model_name, load_half=self.load_half_precision_model)
+                    self.update_progress_timer(LoadModelTime, "Loaded base model")
+
                     res = streaming_runner.run_streaming(
                         image_dir=self.input_folder,
                         image_paths=self.image_paths,
@@ -1379,6 +1404,7 @@ Loop:
                         filter_edges=self.filter_edges,
                         segmentation_data=all_segmentation_data,
                         segmentation_class_names=segmentation_class_names,
+                        metric_first_chunk_prediction=metric_first_chunk_prediction,
                     )
                     # Return both the combined PLY and the per-chunk PCD directory
                     self.result_queue.put({
@@ -1393,6 +1419,11 @@ Loop:
                     traceback.print_exc()
                     self.result_queue.put({"type": "ERROR", "message": f"Streaming failed: {e}"})
                 return
+
+            self.update_progress_timer(0, f"Loading {self.base_model_name} model...")
+            base_model = get_model(self.base_model_name, load_half=self.load_half_precision_model)
+            self.update_progress_timer(LoadModelTime, "Loaded base model")
+            print("Running base model inference...")
             
             all_base_predictions = []
             prev_pred = None

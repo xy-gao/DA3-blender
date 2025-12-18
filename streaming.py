@@ -438,7 +438,19 @@ def remove_duplicates(data_list):
 
 # Based on DA3_Streaming from da3_streaming.py
 class DA3_Modified_Streaming:
-    def __init__(self, image_dir, save_dir, image_paths, config, model=None, progress_callback=None, filter_edges=True, segmentation_data=None, segmentation_class_names=None):
+     def __init__(
+        self,
+        image_dir,
+        save_dir,
+        image_paths,
+        config,
+        model=None,
+        progress_callback=None,
+        filter_edges=True,
+        segmentation_data=None,
+        segmentation_class_names=None,
+        metric_first_chunk_prediction=None,
+    ):
         self.config = config
 
         # Optional UI progress callback: callable(progress_float 0-100, message) -> bool to request stop
@@ -447,6 +459,11 @@ class DA3_Modified_Streaming:
         self._progress_total = 1.0
 
         self.filter_edges = filter_edges
+        # Streaming metric scaling strategy:
+        # Caller provides a metric prediction for the first chunk; we compute scale after
+        # the first base chunk and then discard that metric prediction.
+        self.metric_first_chunk_prediction = metric_first_chunk_prediction
+        self.metric_scale_factor = None
 
         if not image_paths:
             raise ValueError("image_paths must be a non-empty list of image files")
@@ -617,8 +634,75 @@ class DA3_Modified_Streaming:
 
                 predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy)
 
+                # Normalize shapes to the expected [N, ...] convention.
                 predictions.depth = np.squeeze(predictions.depth)
-                predictions.conf -= 1.0 # TODO: Add 1 back when passing results to Blender
+                if getattr(predictions.depth, "ndim", 0) == 2:
+                    predictions.depth = predictions.depth[None, ...]
+
+                predictions.conf = np.squeeze(predictions.conf)
+                if getattr(predictions.conf, "ndim", 0) == 2:
+                    predictions.conf = predictions.conf[None, ...]
+                predictions.conf -= 1.0  # TODO: Add 1 back when passing results to Blender
+
+                if hasattr(predictions, "extrinsics") and predictions.extrinsics is not None:
+                    predictions.extrinsics = np.array(predictions.extrinsics, copy=False)
+                    if predictions.extrinsics.ndim == 2:
+                        predictions.extrinsics = predictions.extrinsics[None, ...]
+
+                if hasattr(predictions, "intrinsics") and predictions.intrinsics is not None:
+                    predictions.intrinsics = np.array(predictions.intrinsics, copy=False)
+                    if predictions.intrinsics.ndim == 2:
+                        predictions.intrinsics = predictions.intrinsics[None, ...]
+
+                if hasattr(predictions, "sky") and predictions.sky is not None:
+                    predictions.sky = np.squeeze(predictions.sky)
+                    if getattr(predictions.sky, "ndim", 0) == 2:
+                        predictions.sky = predictions.sky[None, ...]
+
+                # If the caller provided a metric prediction for the first chunk, compute
+                # the global scale immediately after we have the first base chunk.
+                # This avoids re-running the first base chunk.
+                if (
+                    self.metric_scale_factor is None
+                    and self.metric_first_chunk_prediction is not None
+                    and not is_loop
+                    and chunk_idx == 0
+                    and range_2 is None
+                ):
+                    try:
+                        from .utils import combine_base_and_metric
+
+                        mp = self.metric_first_chunk_prediction
+                        if hasattr(mp, "depth"):
+                            mp.depth = np.squeeze(mp.depth)
+                            if getattr(mp.depth, "ndim", 0) == 2:
+                                mp.depth = mp.depth[None, ...]
+                        if hasattr(mp, "sky") and mp.sky is not None:
+                            mp.sky = np.squeeze(mp.sky)
+                            if getattr(mp.sky, "ndim", 0) == 2:
+                                mp.sky = mp.sky[None, ...]
+
+                        scaled_list = combine_base_and_metric([predictions], [mp])
+                        self.metric_scale_factor = float(getattr(scaled_list[0], "scale_factor", 1.0))
+                        print(f"[da3_streaming] Metric scale factor: {self.metric_scale_factor:.6f}")
+                    except Exception as e:
+                        print(f"[da3_streaming] Warning: failed to compute metric scale from first chunk: {e}")
+                    finally:
+                        # Free the metric prediction ASAP.
+                        self.metric_first_chunk_prediction = None
+
+                # If we have a global metric scale, apply it to all later chunks.
+                # (First chunk already scaled via combine_base_and_metric above.)
+                if self.metric_scale_factor is not None and not (
+                    chunk_idx == 0 and range_2 is None and not is_loop
+                ):
+                    try:
+                        predictions.depth = predictions.depth * self.metric_scale_factor
+                        if hasattr(predictions, "extrinsics") and predictions.extrinsics is not None:
+                            predictions.extrinsics[..., 3] = predictions.extrinsics[..., 3] * self.metric_scale_factor
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
 
                 print(predictions.processed_images.shape)  # [N, H, W, 3] uint8
                 print(predictions.depth.shape)  # [N, H, W] float32
@@ -1444,6 +1528,7 @@ def run_streaming(
     save_debug: bool = False,
     conf_threshold_coef: float = 0.75,
     filter_edges: bool = True,
+    metric_first_chunk_prediction=None,
 ) -> dict:
     if not os.path.isdir(image_dir):
         raise ValueError(f"Image directory does not exist: {image_dir}")
@@ -1470,6 +1555,7 @@ def run_streaming(
         filter_edges=filter_edges,
         segmentation_data=segmentation_data,
         segmentation_class_names=segmentation_class_names,
+        metric_first_chunk_prediction=metric_first_chunk_prediction,
     )
     da3_streaming.run()
     da3_streaming.close()
