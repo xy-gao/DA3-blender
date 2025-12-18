@@ -53,17 +53,29 @@ class DA3Panel(bpy.types.Panel):
             layout.prop(scene, "da3_frame_stride", text="Frame Stride")
         layout.prop(scene, "da3_ref_view_strategy", text="Ref View Strategy")
         if scene.da3_batch_mode == "da3_streaming":
-            layout.prop(scene, "da3_streaming_output", text="Streaming Output")
             box = layout.box()
-            box.label(text="Advanced Streaming Options")
-            box.prop(scene, "da3_streaming_loop_enable", text="Enable Loop Closure")
-            box.prop(scene, "da3_streaming_use_db_ow", text="Use DBOW")
-            box.prop(scene, "da3_streaming_align_lib", text="Alignment Library")
-            box.prop(scene, "da3_streaming_align_method", text="Alignment Method")
-            box.prop(scene, "da3_streaming_depth_threshold", text="Depth Threshold")
-            box.prop(scene, "da3_streaming_conf_threshold_coef", text="Conf Threshold Coef")
-            box.prop(scene, "da3_streaming_save_debug", text="Save Debug Info")
-            box.prop(scene, "da3_streaming_chunk_collections", text="Separate Chunk Collections")
+
+            row = box.row()
+            is_open = bool(getattr(scene, "da3_streaming_advanced_open", True))
+            row.prop(
+                scene,
+                "da3_streaming_advanced_open",
+                text="",
+                emboss=False,
+                icon='TRIA_DOWN' if is_open else 'TRIA_RIGHT',
+            )
+            row.label(text="Advanced Streaming Options")
+
+            if is_open:
+                box.prop(scene, "da3_streaming_output", text="Output")
+                box.prop(scene, "da3_streaming_loop_enable", text="Enable Loop Closure")
+                box.prop(scene, "da3_streaming_use_db_ow", text="Use DBOW")
+                box.prop(scene, "da3_streaming_align_lib", text="Alignment Library")
+                box.prop(scene, "da3_streaming_align_method", text="Alignment Method")
+                box.prop(scene, "da3_streaming_depth_threshold", text="Depth Threshold")
+                box.prop(scene, "da3_streaming_conf_threshold_coef", text="Conf Threshold Coef")
+                box.prop(scene, "da3_streaming_save_debug", text="Save Debug Info")
+                box.prop(scene, "da3_streaming_chunk_collections", text="Separate Chunk Collections")
         layout.prop(scene, "da3_use_ray_pose", text="Use Ray-based Pose")
         layout.prop(scene, "da3_filter_edges", text="Filter Edges")
         layout.prop(scene, "da3_min_confidence", text="Min Confidence")

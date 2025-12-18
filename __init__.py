@@ -168,10 +168,15 @@ def register_classes():
     bpy.utils.register_class(panels.DA3Panel)
     bpy.types.Scene.da3_input_folder = bpy.props.StringProperty(subtype='DIR_PATH')
     bpy.types.Scene.da3_streaming_output = bpy.props.StringProperty(
-        name="Streaming Output",
+        name="Output",
         description="Folder to store DA3-Streaming results",
         subtype='DIR_PATH',
         default=""
+    )
+    bpy.types.Scene.da3_streaming_advanced_open = bpy.props.BoolProperty(
+        name="Advanced Streaming Options",
+        description="Show/hide advanced streaming options",
+        default=True,
     )
     bpy.types.Scene.da3_model_name = bpy.props.EnumProperty(
         items=[
@@ -401,6 +406,7 @@ def unregister_classes():
     bpy.utils.unregister_class(panels.DA3Panel)
     del bpy.types.Scene.da3_input_folder
     del bpy.types.Scene.da3_streaming_output
+    del bpy.types.Scene.da3_streaming_advanced_open
     del bpy.types.Scene.da3_model_name
     del bpy.types.Scene.da3_use_metric
     del bpy.types.Scene.da3_metric_mode
