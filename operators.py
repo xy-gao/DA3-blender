@@ -1034,18 +1034,28 @@ Loop:
 
                 preds = {"intrinsic": intrinsics, "extrinsic": extrinsics}
                 image_paths = getattr(self, "image_paths", None)
+                # Important: DA3/streaming intrinsics are expressed in the *processed* image
+                # coordinate system (e.g. 504x280), not the original file resolution.
+                # Using the original file dimensions here produces wrong lens/shift and
+                # makes camera frustums look incorrect.
                 image_width = None
                 image_height = None
-                if image_paths and len(image_paths) > 0:
-                    try:
-                        import cv2 as _cv2
+                try:
+                    K0 = intrinsics[0]
+                    cx = float(K0[0, 2])
+                    cy = float(K0[1, 2])
+                    # In our pipelines, principal point is typically at (W/2, H/2).
+                    # Infer the processed resolution from it.
+                    iw = int(round(cx * 2.0))
+                    ih = int(round(cy * 2.0))
+                    if iw > 0 and ih > 0:
+                        image_width = iw
+                        image_height = ih
+                except Exception:
+                    pass
 
-                        img = _cv2.imread(image_paths[0])
-                        if img is not None:
-                            image_height, image_width = img.shape[:2]
-                            preds["image_paths"] = image_paths
-                    except Exception:
-                        pass
+                if image_paths:
+                    preds["image_paths"] = image_paths
 
                 create_cameras(preds, collection=_collection, image_width=image_width, image_height=image_height)
                 return True
