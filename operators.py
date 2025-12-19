@@ -1034,40 +1034,22 @@ Loop:
 
                 preds = {"intrinsic": intrinsics, "extrinsic": extrinsics}
                 image_paths = getattr(self, "image_paths", None)
-                # Important: DA3/streaming intrinsics are expressed in the *processed* image
+                # DA3/streaming intrinsics are expressed in the *processed* image
                 # coordinate system (e.g. 504x280), not the original file resolution.
-                # Use the persisted processed image size if available.
-                image_width = None
-                image_height = None
-                try:
-                    size_path = os.path.join(_output_dir, "intrinsic_image_size.txt")
-                    if os.path.exists(size_path):
-                        with open(size_path, "r") as f:
-                            parts = [p for p in f.readline().strip().split() if p.strip()]
-                        if len(parts) >= 2:
-                            iw = int(float(parts[0]))
-                            ih = int(float(parts[1]))
-                            if iw > 0 and ih > 0:
-                                image_width = iw
-                                image_height = ih
-                except Exception:
-                    pass
-
-                # Back-compat fallback for older streaming outputs that don't have
-                # intrinsic_image_size.txt. Prefer *not* to assume cx=W/2, but this is
-                # better than using the original file resolution (which breaks frustums).
-                if (image_width is None or image_height is None) and intrinsics:
-                    try:
-                        K0 = intrinsics[0]
-                        cx = float(K0[0, 2])
-                        cy = float(K0[1, 2])
-                        iw = int(round(cx * 2.0))
-                        ih = int(round(cy * 2.0))
-                        if iw > 0 and ih > 0:
-                            image_width = iw
-                            image_height = ih
-                    except Exception:
-                        pass
+                # Require the persisted processed image size; error if missing.
+                size_path = os.path.join(_output_dir, "intrinsic_image_size.txt")
+                if not os.path.exists(size_path):
+                    raise RuntimeError("Missing intrinsic_image_size.txt: cannot determine processed image size for streaming camera import. Please re-run streaming with a recent version.")
+                with open(size_path, "r") as f:
+                    parts = [p for p in f.readline().strip().split() if p.strip()]
+                if len(parts) < 2:
+                    raise RuntimeError(f"Malformed intrinsic_image_size.txt: expected 'W H' on first line, got: {parts}")
+                iw = int(float(parts[0]))
+                ih = int(float(parts[1]))
+                if iw <= 0 or ih <= 0:
+                    raise RuntimeError(f"Invalid image size in intrinsic_image_size.txt: W={iw}, H={ih}")
+                image_width = iw
+                image_height = ih
 
                 if image_paths:
                     preds["image_paths"] = image_paths

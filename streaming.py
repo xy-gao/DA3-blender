@@ -835,13 +835,30 @@ class DA3_Modified_Streaming:
             # compute lens/shift in the same coordinate system as intrinsics.
             if self.processed_image_size is None:
                 try:
-                    imgs = getattr(predictions, "images", None)
-                    if imgs is not None and hasattr(imgs, "shape") and len(imgs.shape) >= 3:
-                        # Expected: (N, H, W, 3) or (N, H, W)
-                        H = int(imgs.shape[1])
-                        W = int(imgs.shape[2])
-                        if W > 0 and H > 0:
-                            self.processed_image_size = (W, H)
+                    imgs = getattr(predictions, "processed_images", None)
+                    if imgs is None:
+                        imgs = getattr(predictions, "images", None)
+
+                    if imgs is not None and hasattr(imgs, "shape"):
+                        sh = tuple(int(x) for x in imgs.shape)
+                        W = None
+                        H = None
+
+                        # Common case here is processed_images: (N, H, W, 3) uint8
+                        if len(sh) == 4 and sh[-1] in (1, 3, 4):
+                            H, W = sh[1], sh[2]
+                        # Sometimes: (N, 3, H, W)
+                        elif len(sh) == 4 and sh[1] in (1, 3, 4):
+                            H, W = sh[2], sh[3]
+                        # Single image: (H, W, 3)
+                        elif len(sh) == 3 and sh[-1] in (1, 3, 4):
+                            H, W = sh[0], sh[1]
+                        # Single image: (3, H, W)
+                        elif len(sh) == 3 and sh[0] in (1, 3, 4):
+                            H, W = sh[1], sh[2]
+
+                        if W is not None and H is not None and W > 0 and H > 0:
+                            self.processed_image_size = (int(W), int(H))
                 except Exception:
                     pass
 
