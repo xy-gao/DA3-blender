@@ -1057,9 +1057,8 @@ Loop:
                 create_cameras(preds, collection=_collection, image_width=image_width, image_height=image_height)
                 return True
 
-            # Segmentation parity path (non-chunk import): load persistent aligned chunk arrays
-            # from output_dir/segmented_chunks so temp cleanup doesn't break import.
-            if use_segmentation and not use_chunks:
+            # Unified parity path: segmentation, mesh, or motion (non-chunk import)
+            if (use_segmentation or self.detect_motion or generate_mesh) and not use_chunks:
                 output_dir = os.path.dirname(ply_path)
                 seg_dir = os.path.join(output_dir, "segmented_chunks")
                 if os.path.isdir(seg_dir):
@@ -1083,6 +1082,7 @@ Loop:
                         seg_id_list = []
                         id_to_class = {}
                         class_names = {}
+                        motion_scores_list = []
 
                         for _, fname in chunk_files:
                             seg_chunk_path = os.path.join(seg_dir, fname)
@@ -1113,6 +1113,10 @@ Loop:
                             if not class_names:
                                 class_names = seg_chunk.get("class_names") or {}
 
+                            # Motion scores (if present)
+                            if "motion_scores" in seg_chunk:
+                                motion_scores_list.append(seg_chunk["motion_scores"])
+
                         if points_list and images_list and conf_list:
                             points_all = _np.concatenate(points_list, axis=0)
                             images_all = _np.concatenate(images_list, axis=0)
@@ -1130,12 +1134,23 @@ Loop:
                                     pass
                                 d["id_to_class"] = id_to_class
                                 d["class_names"] = class_names
+                            if motion_scores_list:
+                                try:
+                                    d["motion_scores"] = _np.concatenate(motion_scores_list, axis=0)
+                                except Exception:
+                                    pass
 
                             target_col = self.parent_col
                             if not target_col:
                                 target_col = bpy.data.collections.new(folder_name)
                                 context.scene.collection.children.link(target_col)
 
+                            # Detect motion if enabled
+                            if self.detect_motion:
+                                from . import compute_motion_scores
+                                compute_motion_scores([d], threshold_ratio=self.motion_threshold)
+
+                            # Import as mesh or point cloud
                             if generate_mesh:
                                 import_mesh_from_depth(d, collection=target_col, filter_edges=filter_edges, min_confidence=min_confidence)
                             else:
