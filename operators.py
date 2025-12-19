@@ -1147,8 +1147,18 @@ Loop:
 
                             # Detect motion if enabled
                             if self.detect_motion:
-                                from . import compute_motion_scores
-                                compute_motion_scores([d], threshold_ratio=self.motion_threshold)
+                                from types import SimpleNamespace
+                                d_obj = SimpleNamespace(
+                                    depth=d.get("conf"),
+                                    conf=d.get("conf"),
+                                    world_points_from_depth=d.get("world_points_from_depth"),
+                                    images=d.get("images"),
+                                    seg_id_map=d.get("seg_id_map"),
+                                    id_to_class=d.get("id_to_class"),
+                                    class_names=d.get("class_names"),
+                                    motion_scores=d.get("motion_scores"),
+                                )
+                                compute_motion_scores([d_obj], threshold_ratio=self.motion_threshold)
 
                             # Import as mesh or point cloud
                             if generate_mesh:
