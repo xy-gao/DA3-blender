@@ -1148,6 +1148,41 @@ Loop:
                             # Detect motion if enabled
                             if self.detect_motion:
                                 from types import SimpleNamespace
+                                # Load extrinsics and intrinsics from output_dir
+                                import numpy as _np
+                                import os
+                                extrinsics = None
+                                intrinsics = None
+                                output_dir = os.path.dirname(ply_path)
+                                poses_path = os.path.join(output_dir, "camera_poses.txt")
+                                intrinsics_path = os.path.join(output_dir, "intrinsic.txt")
+                                if os.path.exists(poses_path) and os.path.exists(intrinsics_path):
+                                    extrinsics = []
+                                    with open(poses_path, "r") as f:
+                                        for line in f:
+                                            vals = [float(x) for x in line.strip().split() if x.strip()]
+                                            if len(vals) != 16:
+                                                continue
+                                            c2w = _np.array(vals, dtype=_np.float64).reshape((4, 4))
+                                            try:
+                                                w2c = _np.linalg.inv(c2w)
+                                            except Exception:
+                                                continue
+                                            extrinsics.append(w2c[:3, :4].astype(_np.float32))
+                                    intrinsics = []
+                                    with open(intrinsics_path, "r") as f:
+                                        for line in f:
+                                            parts = [p for p in line.strip().split() if p.strip()]
+                                            if len(parts) < 4:
+                                                continue
+                                            fx, fy, cx, cy = [float(x) for x in parts[:4]]
+                                            K = _np.array(
+                                                [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+                                                dtype=_np.float32,
+                                            )
+                                            intrinsics.append(K)
+                                    extrinsics = _np.stack(extrinsics, axis=0) if extrinsics else None
+                                    intrinsics = _np.stack(intrinsics, axis=0) if intrinsics else None
                                 d_obj = SimpleNamespace(
                                     depth=d.get("conf"),
                                     conf=d.get("conf"),
@@ -1157,6 +1192,8 @@ Loop:
                                     id_to_class=d.get("id_to_class"),
                                     class_names=d.get("class_names"),
                                     motion_scores=d.get("motion_scores"),
+                                    extrinsics=extrinsics,
+                                    intrinsics=intrinsics,
                                 )
                                 compute_motion_scores([d_obj], threshold_ratio=self.motion_threshold)
 
