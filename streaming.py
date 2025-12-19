@@ -497,6 +497,9 @@ class DA3_Modified_Streaming:
 
         self.all_camera_poses = []
         self.all_camera_intrinsics = []
+        # (W, H) of the *processed* image plane corresponding to intrinsics.
+        # This is not necessarily the original file resolution.
+        self.processed_image_size = None
 
         self.delete_temp_files = self.config["Model"]["delete_temp_files"]
 
@@ -827,6 +830,20 @@ class DA3_Modified_Streaming:
             chunk_range = self.chunk_indices[chunk_idx]
             self.all_camera_poses.append((chunk_range, extrinsics))
             self.all_camera_intrinsics.append((chunk_range, intrinsics))
+
+            # Capture processed image size from the prediction so Blender import can
+            # compute lens/shift in the same coordinate system as intrinsics.
+            if self.processed_image_size is None:
+                try:
+                    imgs = getattr(predictions, "images", None)
+                    if imgs is not None and hasattr(imgs, "shape") and len(imgs.shape) >= 3:
+                        # Expected: (N, H, W, 3) or (N, H, W)
+                        H = int(imgs.shape[1])
+                        W = int(imgs.shape[2])
+                        if W > 0 and H > 0:
+                            self.processed_image_size = (W, H)
+                except Exception:
+                    pass
 
         np.save(save_path, predictions)
 
@@ -1378,6 +1395,18 @@ class DA3_Modified_Streaming:
                 f.write(f"{fx} {fy} {cx} {cy}\n")
 
         print(f"Camera intrinsics saved to {intrinsics_path}")
+
+        # Persist the processed image size that the intrinsics correspond to.
+        # This lets the Blender importer compute correct lens/shift without guessing.
+        try:
+            if self.processed_image_size is not None:
+                W, H = self.processed_image_size
+                size_path = os.path.join(self.output_dir, "intrinsic_image_size.txt")
+                with open(size_path, "w") as f:
+                    f.write(f"{int(W)} {int(H)}\n")
+                print(f"Camera intrinsic image size saved to {size_path}")
+        except Exception:
+            pass
 
         ply_path = os.path.join(self.output_dir, "camera_poses.ply")
         with open(ply_path, "w") as f:
