@@ -1150,7 +1150,6 @@ Loop:
                                 from types import SimpleNamespace
                                 # Load extrinsics and intrinsics from output_dir
                                 import numpy as _np
-                                import os
                                 extrinsics = None
                                 intrinsics = None
                                 output_dir = os.path.dirname(ply_path)
