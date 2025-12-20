@@ -28,9 +28,9 @@ from .utils import (
 import urllib.request
 import threading
 import queue
+from plyfile import PlyData
 from . import DEFAULT_MODELS_DIR, get_configured_model_folder, get_prefs
 import types
-
 
 def get_any_model_path(model_filename, context=None):
     # Check configured folder first
@@ -976,9 +976,6 @@ Loop:
 
     def _import_streaming_ply(self, context, msg):
         try:
-            import numpy as _np
-            from plyfile import PlyData
-
             folder_name = msg["folder_name"]
             ply_path = msg["path"]
 
@@ -1008,14 +1005,14 @@ Loop:
                         vals = [float(x) for x in line.strip().split() if x.strip()]
                         if len(vals) != 16:
                             continue
-                        c2w = _np.array(vals, dtype=_np.float64).reshape((4, 4))
+                        c2w = np.array(vals, dtype=np.float64).reshape((4, 4))
                         # The streaming pipeline saves camera poses as C2W (camera->world).
                         # `create_cameras` expects W2C (world->camera), so invert.
                         try:
-                            w2c = _np.linalg.inv(c2w)
+                            w2c = np.linalg.inv(c2w)
                         except Exception:
                             continue
-                        extrinsics.append(w2c[:3, :4].astype(_np.float32))
+                        extrinsics.append(w2c[:3, :4].astype(np.float32))
 
                 with open(intrinsics_path, "r") as f:
                     for line in f:
@@ -1023,9 +1020,9 @@ Loop:
                         if len(parts) < 4:
                             continue
                         fx, fy, cx, cy = [float(x) for x in parts[:4]]
-                        K = _np.array(
+                        K = np.array(
                             [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
-                            dtype=_np.float32,
+                            dtype=np.float32,
                         )
                         intrinsics.append(K)
 
@@ -1086,7 +1083,7 @@ Loop:
 
                         for _, fname in chunk_files:
                             seg_chunk_path = os.path.join(seg_dir, fname)
-                            seg_chunk_obj = _np.load(seg_chunk_path, allow_pickle=True)
+                            seg_chunk_obj = np.load(seg_chunk_path, allow_pickle=True)
                             seg_chunk = seg_chunk_obj.item() if hasattr(seg_chunk_obj, 'item') else seg_chunk_obj
                             if not isinstance(seg_chunk, dict):
                                 continue
@@ -1099,7 +1096,7 @@ Loop:
                             conf += 1.0
 
                             points_list.append(points)
-                            images_list.append(images_u8.astype(_np.float32) / 255.0)
+                            images_list.append(images_u8.astype(np.float32) / 255.0)
                             conf_list.append(conf)
 
                             seg_id_map = seg_chunk.get("seg_id_map")
@@ -1118,9 +1115,9 @@ Loop:
                                 motion_scores_list.append(seg_chunk["motion_scores"])
 
                         if points_list and images_list and conf_list:
-                            points_all = _np.concatenate(points_list, axis=0)
-                            images_all = _np.concatenate(images_list, axis=0)
-                            conf_all = _np.concatenate(conf_list, axis=0)
+                            points_all = np.concatenate(points_list, axis=0)
+                            images_all = np.concatenate(images_list, axis=0)
+                            conf_all = np.concatenate(conf_list, axis=0)
 
                             d = {
                                 "world_points_from_depth": points_all,
@@ -1129,14 +1126,14 @@ Loop:
                             }
                             if seg_id_list:
                                 try:
-                                    d["seg_id_map"] = _np.concatenate(seg_id_list, axis=0)
+                                    d["seg_id_map"] = np.concatenate(seg_id_list, axis=0)
                                 except Exception:
                                     pass
                                 d["id_to_class"] = id_to_class
                                 d["class_names"] = class_names
                             if motion_scores_list:
                                 try:
-                                    d["motion_scores"] = _np.concatenate(motion_scores_list, axis=0)
+                                    d["motion_scores"] = np.concatenate(motion_scores_list, axis=0)
                                 except Exception:
                                     pass
 
@@ -1147,9 +1144,7 @@ Loop:
 
                             # Detect motion if enabled
                             if self.detect_motion:
-                                from types import SimpleNamespace
                                 # Load extrinsics and intrinsics from output_dir
-                                import numpy as _np
                                 extrinsics = None
                                 intrinsics = None
                                 output_dir = os.path.dirname(ply_path)
@@ -1162,12 +1157,12 @@ Loop:
                                             vals = [float(x) for x in line.strip().split() if x.strip()]
                                             if len(vals) != 16:
                                                 continue
-                                            c2w = _np.array(vals, dtype=_np.float64).reshape((4, 4))
+                                            c2w = np.array(vals, dtype=np.float64).reshape((4, 4))
                                             try:
-                                                w2c = _np.linalg.inv(c2w)
+                                                w2c = np.linalg.inv(c2w)
                                             except Exception:
                                                 continue
-                                            extrinsics.append(w2c[:3, :4].astype(_np.float32))
+                                            extrinsics.append(w2c[:3, :4].astype(np.float32))
                                     intrinsics = []
                                     with open(intrinsics_path, "r") as f:
                                         for line in f:
@@ -1175,14 +1170,14 @@ Loop:
                                             if len(parts) < 4:
                                                 continue
                                             fx, fy, cx, cy = [float(x) for x in parts[:4]]
-                                            K = _np.array(
+                                            K = np.array(
                                                 [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
-                                                dtype=_np.float32,
+                                                dtype=np.float32,
                                             )
                                             intrinsics.append(K)
-                                    extrinsics = _np.stack(extrinsics, axis=0) if extrinsics else None
-                                    intrinsics = _np.stack(intrinsics, axis=0) if intrinsics else None
-                                d_obj = SimpleNamespace(
+                                    extrinsics = np.stack(extrinsics, axis=0) if extrinsics else None
+                                    intrinsics = np.stack(intrinsics, axis=0) if intrinsics else None
+                                d_obj = types.SimpleNamespace(
                                     depth=d.get("conf"),
                                     conf=d.get("conf"),
                                     world_points_from_depth=d.get("world_points_from_depth"),
@@ -1226,7 +1221,7 @@ Loop:
                             seg_chunk_path = os.path.join(seg_dir, f"chunk_{idx}.npy")
 
                             if os.path.exists(seg_chunk_path):
-                                seg_chunk_obj = _np.load(seg_chunk_path, allow_pickle=True)
+                                seg_chunk_obj = np.load(seg_chunk_path, allow_pickle=True)
                                 seg_chunk = seg_chunk_obj.item() if hasattr(seg_chunk_obj, 'item') else seg_chunk_obj
 
                                 # Expect dict with world_points/conf/images; may also include segmaps
@@ -1237,7 +1232,7 @@ Loop:
                                     raise ValueError("Segmented chunk data missing required keys")
                                 conf += 1.0
 
-                                images = images_u8.astype(_np.float32) / 255.0
+                                images = images_u8.astype(np.float32) / 255.0
 
                                 d = {
                                     "world_points_from_depth": points,
@@ -1263,21 +1258,21 @@ Loop:
 
                         plydata = PlyData.read(chunk_path)
                         vertices = plydata["vertex"].data
-                        pts = _np.stack([vertices["x"], vertices["y"], vertices["z"]], axis=1).astype(_np.float32)
+                        pts = np.stack([vertices["x"], vertices["y"], vertices["z"]], axis=1).astype(np.float32)
                         pts[:, [0, 1, 2]] = pts[:, [0, 2, 1]]
                         pts[:, 2] = -pts[:, 2]
 
                         if {"red", "green", "blue"}.issubset(vertices.dtype.names):
-                            cols = _np.stack([vertices["red"], vertices["green"], vertices["blue"]], axis=1).astype(_np.float32) / 255.0
+                            cols = np.stack([vertices["red"], vertices["green"], vertices["blue"]], axis=1).astype(np.float32) / 255.0
                         else:
-                            cols = _np.ones((len(pts), 3), dtype=_np.float32)
-                        cols = _np.hstack((cols, _np.ones((len(pts), 1), dtype=_np.float32)))
+                            cols = np.ones((len(pts), 3), dtype=np.float32)
+                        cols = np.hstack((cols, np.ones((len(pts), 1), dtype=np.float32)))
 
                         if "confidence" in vertices.dtype.names:
-                            confs = vertices["confidence"].astype(_np.float32)
+                            confs = vertices["confidence"].astype(np.float32)
                             confs += 1.0
                         else:
-                            confs = _np.ones((len(pts),), dtype=_np.float32)
+                            confs = np.ones((len(pts),), dtype=np.float32)
 
                         chunk_col_name = f"{folder_name}_chunk_{idx}"
                         chunk_col = bpy.data.collections.new(chunk_col_name)
@@ -1305,23 +1300,23 @@ Loop:
 
             plydata = PlyData.read(ply_path)
             vertices = plydata["vertex"].data  # structured numpy array
-            pts = _np.stack([vertices["x"], vertices["y"], vertices["z"]], axis=1).astype(_np.float32)
+            pts = np.stack([vertices["x"], vertices["y"], vertices["z"]], axis=1).astype(np.float32)
             # Match the same coordinate conversion used in import_point_cloud
             pts[:, [0, 1, 2]] = pts[:, [0, 2, 1]]
             pts[:, 2] = -pts[:, 2]
 
             if {"red", "green", "blue"}.issubset(vertices.dtype.names):
-                cols = _np.stack([vertices["red"], vertices["green"], vertices["blue"]], axis=1).astype(_np.float32) / 255.0
+                cols = np.stack([vertices["red"], vertices["green"], vertices["blue"]], axis=1).astype(np.float32) / 255.0
             else:
-                cols = _np.ones((len(pts), 3), dtype=_np.float32)
-            cols = _np.hstack((cols, _np.ones((len(pts), 1), dtype=_np.float32)))
+                cols = np.ones((len(pts), 3), dtype=np.float32)
+            cols = np.hstack((cols, np.ones((len(pts), 1), dtype=np.float32)))
 
             if "confidence" in vertices.dtype.names:
-                confs = vertices["confidence"].astype(_np.float32)
+                confs = vertices["confidence"].astype(np.float32)
                 confs += 1.0                            
                 print(f"DEBUG: Loaded confidence from PLY - min: {confs.min():.4f}, max: {confs.max():.4f}, mean: {confs.mean():.4f}")
             else:
-                confs = _np.ones((len(pts),), dtype=_np.float32)
+                confs = np.ones((len(pts),), dtype=np.float32)
                 print("DEBUG: No confidence in PLY, using all 1.0")
             obj_name = f"{folder_name}_StreamingCloud"
             create_point_cloud_object(obj_name, pts, cols, confs, collection=target_col)
@@ -1354,7 +1349,6 @@ Loop:
                 print(f"After frame stride {frame_stride}: {len(self.image_paths)} images")
 
             if self.batch_mode == "skip_frames" and len(self.image_paths) > self.batch_size:
-                import numpy as np
                 indices = np.linspace(0, len(self.image_paths) - 1, self.batch_size, dtype=int)
                 self.image_paths = [self.image_paths[i] for i in indices]
             
