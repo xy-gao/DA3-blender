@@ -1059,6 +1059,39 @@ Loop:
                 output_dir = os.path.dirname(ply_path)
                 seg_dir = os.path.join(output_dir, "segmented_chunks")
                 if os.path.isdir(seg_dir):
+                    # Load extrinsics and intrinsics once
+                    extrinsics = None
+                    intrinsics = None
+                    poses_path = os.path.join(output_dir, "camera_poses.txt")
+                    intrinsics_path = os.path.join(output_dir, "intrinsic.txt")
+                    if os.path.exists(poses_path) and os.path.exists(intrinsics_path):
+                        extrinsics = []
+                        with open(poses_path, "r") as f:
+                            for line in f:
+                                vals = [float(x) for x in line.strip().split() if x.strip()]
+                                if len(vals) != 16:
+                                    continue
+                                c2w = np.array(vals, dtype=np.float64).reshape((4, 4))
+                                try:
+                                    w2c = np.linalg.inv(c2w)
+                                except Exception:
+                                    continue
+                                extrinsics.append(w2c[:3, :4].astype(np.float32))
+                        intrinsics = []
+                        with open(intrinsics_path, "r") as f:
+                            for line in f:
+                                parts = [p for p in line.strip().split() if p.strip()]
+                                if len(parts) < 4:
+                                    continue
+                                fx, fy, cx, cy = [float(x) for x in parts[:4]]
+                                K = np.array(
+                                    [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+                                    dtype=np.float32,
+                                )
+                                intrinsics.append(K)
+                        extrinsics = np.stack(extrinsics, axis=0) if extrinsics else None
+                        intrinsics = np.stack(intrinsics, axis=0) if intrinsics else None
+
                     chunk_files = []
                     for f in os.listdir(seg_dir):
                         if not (f.startswith("chunk_") and f.lower().endswith(".npy")):
@@ -1080,8 +1113,10 @@ Loop:
                         id_to_class = {}
                         class_names = {}
                         motion_scores_list = []
+                        extrinsics_list = []
+                        intrinsics_list = []
 
-                        for _, fname in chunk_files:
+                        for idx, fname in chunk_files:
                             seg_chunk_path = os.path.join(seg_dir, fname)
                             seg_chunk_obj = np.load(seg_chunk_path, allow_pickle=True)
                             seg_chunk = seg_chunk_obj.item() if hasattr(seg_chunk_obj, 'item') else seg_chunk_obj
@@ -1114,6 +1149,15 @@ Loop:
                             if "motion_scores" in seg_chunk:
                                 motion_scores_list.append(seg_chunk["motion_scores"])
 
+                            # Collect extrinsics and intrinsics for this chunk
+                            if extrinsics is not None and intrinsics is not None:
+                                start_idx = idx * 5
+                                num_frames = len(points)
+                                chunk_extrinsics = extrinsics[start_idx : start_idx + num_frames]
+                                chunk_intrinsics = intrinsics[start_idx : start_idx + num_frames]
+                                extrinsics_list.append(chunk_extrinsics)
+                                intrinsics_list.append(chunk_intrinsics)
+
                         if points_list and images_list and conf_list:
                             points_all = np.concatenate(points_list, axis=0)
                             images_all = np.concatenate(images_list, axis=0)
@@ -1144,39 +1188,8 @@ Loop:
 
                             # Detect motion if enabled
                             if self.detect_motion:
-                                # Load extrinsics and intrinsics from output_dir
-                                extrinsics = None
-                                intrinsics = None
-                                output_dir = os.path.dirname(ply_path)
-                                poses_path = os.path.join(output_dir, "camera_poses.txt")
-                                intrinsics_path = os.path.join(output_dir, "intrinsic.txt")
-                                if os.path.exists(poses_path) and os.path.exists(intrinsics_path):
-                                    extrinsics = []
-                                    with open(poses_path, "r") as f:
-                                        for line in f:
-                                            vals = [float(x) for x in line.strip().split() if x.strip()]
-                                            if len(vals) != 16:
-                                                continue
-                                            c2w = np.array(vals, dtype=np.float64).reshape((4, 4))
-                                            try:
-                                                w2c = np.linalg.inv(c2w)
-                                            except Exception:
-                                                continue
-                                            extrinsics.append(w2c[:3, :4].astype(np.float32))
-                                    intrinsics = []
-                                    with open(intrinsics_path, "r") as f:
-                                        for line in f:
-                                            parts = [p for p in line.strip().split() if p.strip()]
-                                            if len(parts) < 4:
-                                                continue
-                                            fx, fy, cx, cy = [float(x) for x in parts[:4]]
-                                            K = np.array(
-                                                [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
-                                                dtype=np.float32,
-                                            )
-                                            intrinsics.append(K)
-                                    extrinsics = np.stack(extrinsics, axis=0) if extrinsics else None
-                                    intrinsics = np.stack(intrinsics, axis=0) if intrinsics else None
+                                extrinsics_all = np.concatenate(extrinsics_list, axis=0) if extrinsics_list else None
+                                intrinsics_all = np.concatenate(intrinsics_list, axis=0) if intrinsics_list else None
                                 d_obj = types.SimpleNamespace(
                                     depth=d.get("conf"),
                                     conf=d.get("conf"),
@@ -1186,8 +1199,8 @@ Loop:
                                     id_to_class=d.get("id_to_class"),
                                     class_names=d.get("class_names"),
                                     motion_scores=d.get("motion_scores"),
-                                    extrinsics=extrinsics,
-                                    intrinsics=intrinsics,
+                                    extrinsics=extrinsics_all,
+                                    intrinsics=intrinsics_all,
                                 )
                                 compute_motion_scores([d_obj], threshold_ratio=self.motion_threshold)
 
