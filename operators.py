@@ -1259,6 +1259,14 @@ Loop:
                                     d["id_to_class"] = seg_chunk.get("id_to_class", {}) or {}
                                     d["class_names"] = seg_chunk.get("class_names", {}) or {}
 
+                                # Add image paths for texturing
+                                from pathlib import Path
+                                image_list = sorted(list(Path(self.input_folder).glob("*.png")))
+                                chunk_size = 10
+                                overlap = 5
+                                start_idx = idx * (chunk_size - overlap)
+                                d["image_paths"] = [str(p) for p in image_list[start_idx:start_idx + points.shape[0]]]
+
                                 chunk_col_name = f"{folder_name}_chunk_{idx}"
                                 chunk_col = bpy.data.collections.new(chunk_col_name)
                                 target_parent.children.link(chunk_col)
