@@ -1168,7 +1168,7 @@ Loop:
                                 "images": images_all,
                                 "conf": conf_all,
                             }
-                            if seg_id_list:
+                            if self.use_segmentation and seg_id_list:
                                 try:
                                     d["seg_id_map"] = np.concatenate(seg_id_list, axis=0)
                                 except Exception:
@@ -1203,6 +1203,7 @@ Loop:
                                     intrinsics=intrinsics_all,
                                 )
                                 compute_motion_scores([d_obj], threshold_ratio=self.motion_threshold)
+                                d["motion"] = d_obj.motion
 
                             # Import as mesh or point cloud
                             if generate_mesh:
