@@ -185,7 +185,6 @@ class Dependencies:
             print(f'Installing faiss-gpu: {cmd}')
             subprocess.check_call(cmd)
             Dependencies._ensure_pinned_opencv()
-            Dependencies._ensure_pypose_installed()
             Dependencies._ensure_sklearn_installed()
             return True
         except subprocess.CalledProcessError as e:
@@ -207,7 +206,6 @@ class Dependencies:
                     print(f'Installing streaming fallback: {fc}')
                     subprocess.check_call(fc)
                 Dependencies._ensure_pinned_opencv()
-                Dependencies._ensure_pypose_installed()
                 Dependencies._ensure_sklearn_installed()
                 return True
             except subprocess.CalledProcessError as e2:
@@ -235,24 +233,6 @@ class Dependencies:
             subprocess.check_call(cmd)
         except subprocess.CalledProcessError as e:
             print(f'Warning: failed to enforce pinned OpenCV ({OPENCV_PINNED}): {e}')
-
-    @staticmethod
-    def _ensure_pypose_installed():
-        """Best-effort install of pypose into deps_public; ignore failure on unsupported platforms."""
-        try:
-            cmd = [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "pypose",
-                "--target",
-                os.fspath(deps_path),
-            ]
-            print(f'Ensuring pypose (best-effort): {cmd}')
-            subprocess.check_call(cmd)
-        except subprocess.CalledProcessError as e:
-            print(f'Warning: pypose install failed (may be unsupported on this platform): {e}')
 
     @staticmethod
     def _ensure_sklearn_installed():

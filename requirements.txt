@@ -32,3 +32,4 @@ lapx>=0.5.5 # lap is required by ultralytics, but when lap attempted to automati
 pandas
 prettytable
 numba
+pypose
