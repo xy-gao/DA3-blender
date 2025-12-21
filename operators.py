@@ -366,11 +366,18 @@ def get_model(model_name, load_half=False):
         display_VRAM_usage(f"before loading {model_name}")
         config_model_name = CONFIG_NAME_MAP.get(model_name, model_name)
         model = DepthAnything3(model_name=config_model_name)
+        # Remove unused Gaussian Splat components before loading to save VRAM
+        if hasattr(model, 'gs_head'):
+            delattr(model, 'gs_head')
+        if hasattr(model, 'gs_adapter'):
+            delattr(model, 'gs_adapter')
         model_path = get_model_path(model_name)
         if os.path.exists(model_path):
             from safetensors.torch import load_file
             # Keep weights on CPU during load to avoid fp32 GPU residency
             weight = load_file(model_path, device="cpu")
+            # Exclude unused Gaussian Splat components to save VRAM
+            weight = {k: v for k, v in weight.items() if not k.startswith(('gs_head.', 'gs_adapter.'))}
             if load_half:
                 weight = {k: (v.half() if v.is_floating_point() else v) for k, v in weight.items()}
                 model = model.half()  # set module params/buffers to half before loading
