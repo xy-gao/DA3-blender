@@ -171,34 +171,27 @@ class Dependencies:
     @staticmethod
     def install_streaming_deps():
         """Install DA3-Streaming extra requirements into deps_public with fallbacks."""
-        streaming_reqs = DA3_DIR / 'da3_streaming' / 'requirements.txt'
-        if not streaming_reqs.exists():
-            print(f"Streaming requirements not found: {streaming_reqs}")
-            return False
-
         try:
-            # Primary attempt: full requirements
+            # Try to install faiss-gpu first
             cmd = [
                 sys.executable,
                 '-m',
                 'pip',
                 'install',
-                '-r',
-                os.fspath(streaming_reqs),
+                'faiss-gpu',
                 '--target',
                 os.fspath(deps_path),
             ]
-            print(f'Installing streaming deps: {cmd}')
+            print(f'Installing faiss-gpu: {cmd}')
             subprocess.check_call(cmd)
             Dependencies._ensure_pinned_opencv()
             Dependencies._ensure_pypose_installed()
             Dependencies._ensure_sklearn_installed()
             return True
         except subprocess.CalledProcessError as e:
-            print('Streaming deps install failed, retrying with faiss-cpu fallback and without pypose...')
+            print('faiss-gpu install failed, falling back to faiss-cpu...')
             try:
-                # Fallback: install without faiss-gpu/pypose, add faiss-cpu
-                # Remove or override problematic packages by installing the desired ones explicitly
+                # Fallback: install faiss-cpu and other deps
                 fallback_cmds = [
                     [
                         sys.executable,
@@ -209,23 +202,9 @@ class Dependencies:
                         '--target',
                         os.fspath(deps_path),
                     ],
-                    [
-                        sys.executable,
-                        '-m',
-                        'pip',
-                        'install',
-                        'pandas',
-                        'prettytable',
-                        'einops',
-                        'safetensors',
-                        'numba',
-                        'scikit-learn',
-                        '--target',
-                        os.fspath(deps_path),
-                    ],
                 ]
                 for fc in fallback_cmds:
-                    print(f'Installing streaming fallback chunk: {fc}')
+                    print(f'Installing streaming fallback: {fc}')
                     subprocess.check_call(fc)
                 Dependencies._ensure_pinned_opencv()
                 Dependencies._ensure_pypose_installed()
