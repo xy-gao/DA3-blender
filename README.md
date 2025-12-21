@@ -1,9 +1,19 @@
-# DA3-blender
+# DA3-blender 1.1
 Blender addon for Depth-Anything-3 3D reconstruction
 
 Input an image folder which contains single or multiple images, then you will get point cloud geometry nodes with material.
 
 This blender addon is based on [Depth-Anything-3](https://github.com/ByteDance-Seed/Depth-Anything-3). 
+
+## Version Changes for 1.1
+- Asynchronous operation, with progress bars (Esc or right-click to cancel)
+- DA3 Streaming batch mode
+- New 1.1 models which fixed a bug in their training
+- Model can now be loaded in 16-bit (hacky and experimental)
+- Frame Stride option
+- Reference View Strategy option
+- Bug fixes (and new bugs)
+- Installation now requires an extra step to install dependencies
 
 ## Usage
 1. Download Depth-Anything-3 model from operation panel (press N to toggle Sidebar, and click DA3 tab).
