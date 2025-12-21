@@ -179,6 +179,7 @@ class Dependencies:
                 'pip',
                 'install',
                 'faiss-gpu',
+                'numpy==1.26.4',  # Pin numpy to prevent version conflicts
                 '--target',
                 os.fspath(deps_path),
             ]
@@ -197,6 +198,7 @@ class Dependencies:
                         'pip',
                         'install',
                         'faiss-cpu',
+                        'numpy==1.26.4',  # Pin numpy to prevent version conflicts
                         '--target',
                         os.fspath(deps_path),
                     ],
@@ -224,6 +226,7 @@ class Dependencies:
                 "install",
                 "--force-reinstall",
                 OPENCV_PINNED,
+                "numpy==1.26.4",  # Pin numpy to prevent version conflicts
                 "--target",
                 os.fspath(deps_path),
             ]
