@@ -33,3 +33,4 @@ pandas
 prettytable
 numba
 pypose
+scikit-learn

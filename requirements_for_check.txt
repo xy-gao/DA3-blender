@@ -32,4 +32,5 @@ pandas
 prettytable
 numba
 pypose
+scikit-learn
 # depth_anything_3

@@ -185,7 +185,6 @@ class Dependencies:
             print(f'Installing faiss-gpu: {cmd}')
             subprocess.check_call(cmd)
             Dependencies._ensure_pinned_opencv()
-            Dependencies._ensure_sklearn_installed()
             return True
         except subprocess.CalledProcessError as e:
             print('faiss-gpu install failed, falling back to faiss-cpu...')
@@ -206,7 +205,6 @@ class Dependencies:
                     print(f'Installing streaming fallback: {fc}')
                     subprocess.check_call(fc)
                 Dependencies._ensure_pinned_opencv()
-                Dependencies._ensure_sklearn_installed()
                 return True
             except subprocess.CalledProcessError as e2:
                 print(f'Fallback streaming deps install failed: {e2}')
@@ -233,24 +231,6 @@ class Dependencies:
             subprocess.check_call(cmd)
         except subprocess.CalledProcessError as e:
             print(f'Warning: failed to enforce pinned OpenCV ({OPENCV_PINNED}): {e}')
-
-    @staticmethod
-    def _ensure_sklearn_installed():
-        """Best-effort install of scikit-learn into deps_public for loop closure utilities."""
-        try:
-            cmd = [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "scikit-learn",
-                "--target",
-                os.fspath(deps_path),
-            ]
-            print(f'Ensuring scikit-learn (best-effort): {cmd}')
-            subprocess.check_call(cmd)
-        except subprocess.CalledProcessError as e:
-            print(f'Warning: scikit-learn install failed: {e}')
 
     @staticmethod
     def _update_submodules():
