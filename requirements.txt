@@ -28,3 +28,7 @@ addict
 pycolmap
 ultralytics # for YOLO image segmentation
 lapx>=0.5.5 # lap is required by ultralytics, but when lap attempted to automatically install, it installed to the wrong python environment
+# DA3-Streaming dependencies
+pandas
+prettytable
+numba

@@ -116,6 +116,9 @@ class Dependencies:
             print(f'  Exception: {e}')
             print(f'  Requirements: {DA3_DIR}')
             return False
+        # Install streaming dependencies
+        if not Dependencies.install_streaming_deps():
+            print("Warning: Streaming dependencies installation failed, but continuing.")
         return Dependencies.check(force=True)
 
     @staticmethod

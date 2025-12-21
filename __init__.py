@@ -87,25 +87,6 @@ class DA3InstallDepsOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class DA3InstallStreamingDepsOperator(bpy.types.Operator):
-    bl_idname = "da3.install_streaming_deps"
-    bl_label = "Install DA3-Streaming Deps"
-    bl_description = "Install DA3-Streaming requirements into addon deps (faiss-cpu fallback)"
-    bl_options = {"REGISTER", "INTERNAL"}
-
-    def execute(self, context):
-        try:
-            ok = Dependencies.install_streaming_deps()
-            if ok:
-                self.report({'INFO'}, "DA3-Streaming dependencies installed.")
-                return {'FINISHED'}
-            self.report({'ERROR'}, "Failed to install DA3-Streaming dependencies. Check console.")
-            return {'CANCELLED'}
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to install DA3-Streaming dependencies: {e}")
-            return {'CANCELLED'}
-
-
 class DA3UpdateDA3RepoOperator(bpy.types.Operator):
     bl_idname = "da3.update_da3_repo"
     bl_label = "Update Depth Anything 3"
@@ -148,9 +129,6 @@ class DA3AddonPreferences(bpy.types.AddonPreferences):
         row = box.row()
         row.operator(DA3UpdateDA3RepoOperator.bl_idname, text="Update Depth Anything 3 (recursive)")
 
-        row = box.row()
-        row.operator("da3.install_streaming_deps", text="Install DA3-Streaming Deps")
-        
         layout.separator()
 
         if not Dependencies.check():
@@ -474,7 +452,6 @@ class DA3InstallDepsPanel(bpy.types.Panel):
 classes = [
     DA3AddonPreferences,
     DA3InstallDepsOperator,
-    DA3InstallStreamingDepsOperator,
     DA3UpdateDA3RepoOperator,
     MoveModelsOperator,
 ]
