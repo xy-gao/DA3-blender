@@ -6,7 +6,8 @@ trimesh
 einops
 huggingface_hub
 imageio
-opencv-python
+# Pin to numpy-1.26.x-compatible release; newer (4.12+) requires numpy>=2
+opencv-python==4.11.0.86
 # xformers
 open3d
 fastapi
@@ -26,4 +27,10 @@ addict
 pycolmap
 ultralytics # for YOLO image segmentation
 lapx>=0.5.5 # lap is required by ultralytics, but when lap attempted to automatically install, it installed to the wrong python environment
+# DA3-Streaming dependencies
+pandas
+prettytable
+numba
+pypose
+scikit-learn
 # depth_anything_3

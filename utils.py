@@ -15,10 +15,14 @@ from depth_anything_3.utils.alignment import (
     set_sky_regions_to_max_depth,
 )
 
-def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
+def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics, progress_callback=None):
     N, H, W = depth.shape
     world_points = np.zeros((N, H, W, 3), dtype=np.float32)
     for i in range(N):
+        if progress_callback:
+            if progress_callback(i / N * 100):
+                return None
+
         u, v = np.meshgrid(np.arange(W), np.arange(H))
         pixels = np.stack([u, v, np.ones((H, W))], axis=-1).reshape(-1, 3)  # HW, 3
         invK = np.linalg.inv(intrinsics[i])
@@ -31,10 +35,17 @@ def unproject_depth_map_to_point_map(depth, extrinsics, intrinsics):
         world_points_hom = (cam_to_world @ cam_points_hom.T).T  # HW, 4
         world_points_i = world_points_hom[:, :3] / world_points_hom[:, 3:4]
         world_points[i] = world_points_i.reshape(H, W, 3)
+
+    if progress_callback:
+        progress_callback(100)
+
     return world_points
 
-def run_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False, use_ray_pose=False):
+def run_model(image_paths, model, process_res=504, process_res_method="upper_bound_resize", use_half=False, use_ray_pose=False, progress_callback=None, ref_view_strategy="saddle_balanced"):
     print(f"Processing {len(image_paths)} images")
+    if not image_paths:
+        raise ValueError("No images provided.")
+    
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
         allocated = torch.cuda.memory_allocated() / 1024**2
@@ -43,11 +54,14 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
         total_mb = total / 1024**2
         print(f"VRAM before inference: {allocated:.1f} MB (free: {free_mb:.1f} MB / {total_mb:.1f} MB)")
     import torch.cuda.amp as amp
+
     if use_half:
-        with amp.autocast():
-            prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
+        # Ensure all inputs/activations run in fp16 to match fp16 weights when load_half_precision_model is set
+        with amp.autocast(dtype=torch.float16):
+            prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose, ref_view_strategy=ref_view_strategy)
     else:
-        prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose)
+        prediction = model.inference(image_paths, process_res=process_res, process_res_method=process_res_method, use_ray_pose=use_ray_pose, ref_view_strategy=ref_view_strategy)
+
     if torch.cuda.is_available():
         peak = torch.cuda.max_memory_allocated() / 1024**2
         allocated = torch.cuda.memory_allocated() / 1024**2
@@ -61,6 +75,7 @@ def run_model(image_paths, model, process_res=504, process_res_method="upper_bou
         print("DEBUG prediction.__dict__ keys:", list(prediction.__dict__.keys()))
     else:
         print("DEBUG dir(prediction):", dir(prediction))
+
     return prediction
 
 # Helper functions for matrix operations and type conversion
@@ -92,6 +107,130 @@ def _invert_4x4_torch(T):
 # all_predictions is list of (prediction_for_batch, frame_indices_for_batch)
 # prediction_for_batch is the result returned by run_model, and is class depth_anything_3.specs.Prediction
 # and has these fields: ['depth', 'is_metric', 'sky', 'conf', 'extrinsics', 'intrinsics', 'processed_images', 'gaussians', 'aux', 'scale_factor']
+def align_single_batch(curr_pred_orig, curr_indices, prev_pred, prev_indices):
+    import copy
+    curr_pred = copy.copy(curr_pred_orig)
+    
+    curr_depth = _to_tensor(curr_pred.depth).float() # depth of every pixel in every image in the batch
+    curr_conf = _to_tensor(curr_pred.conf).float() # confidence of depth of every pixel in every image in the batch, range 0 to more than 1
+    curr_ext = _to_tensor(curr_pred.extrinsics) # camera position and rotation for every image in the batch (or None for Metric/Mono model)
+    if curr_ext is not None:
+        curr_ext = curr_ext.float()
+    
+    # Alignment for Metric/Mono model is not supported yet. TODO: still align the depth based on overlap images
+    if curr_ext is None:
+        print(f"Batch has no extrinsics, skipping alignment.")
+        return curr_pred
+
+    # depths, depth confidences, and camera poses for all images in the previous batch
+    prev_depth = _to_tensor(prev_pred.depth).float()
+    prev_conf = _to_tensor(prev_pred.conf).float()
+    prev_ext = _to_tensor(prev_pred.extrinsics).float()
+    
+    # Find overlapping indices
+    common_indices = set(prev_indices) & set(curr_indices)
+    if not common_indices:
+        print(f"Warning: Batch has no overlap with previous batch. Alignment may be poor.")
+        return curr_pred
+        
+    # Sort common indices to ensure deterministic order
+    common_indices = sorted(list(common_indices))
+    
+    # Collect valid pixels for depth scaling
+    valid_prev_depths = []
+    valid_curr_depths = []
+    
+    # Collect transforms for extrinsic alignment
+    transforms = []
+
+    # for each overlapping frame
+    for global_idx in common_indices:
+        idx_prev = prev_indices.index(global_idx)
+        idx_curr = curr_indices.index(global_idx)
+        
+        d_prev = prev_depth[idx_prev] # [H, W] depth of every pixel for this frame in the previous batch
+        d_curr = curr_depth[idx_curr] # [H, W] depth of every pixel for this frame in the current batch
+        c_prev = prev_conf[idx_prev]  # [H, W] confidence of every pixel for this frame in the previous batch
+        
+        # We only want to calculate scale from pixels that aren't sky
+        # For Metric/Mono/Nested models use the returned sky mask
+        # For base models there is no sky mask, so assume all pixels are non-sky
+        non_sky_mask = torch.ones_like(d_prev, dtype=torch.bool) # [H, W]
+        if hasattr(prev_pred, 'sky') and prev_pred.sky is not None:
+             non_sky_mask = non_sky_mask & compute_sky_mask(_to_tensor(prev_pred.sky)[idx_prev], threshold=0.3)
+        if hasattr(curr_pred, 'sky') and curr_pred.sky is not None:
+             non_sky_mask = non_sky_mask & compute_sky_mask(_to_tensor(curr_pred.sky)[idx_curr], threshold=0.3)
+        
+        d_prev_3d = d_prev.unsqueeze(0)
+        d_curr_3d = d_curr.unsqueeze(0)
+        c_prev_3d = c_prev.unsqueeze(0)
+        non_sky_mask_3d = non_sky_mask.unsqueeze(0)
+        
+        c_prev_ns = c_prev[non_sky_mask] # [num_non_sky_pixels]
+        if c_prev_ns.numel() > 0:
+            c_prev_sampled = sample_tensor_for_quantile(c_prev_ns, max_samples=100000) # if there are more than 100,000 non-sky pixels, randomly select 100,000 of them
+            median_conf = torch.quantile(c_prev_sampled, 0.5) # calculate the median confidence (half the pixels have higher confidence than this, half have lower confidence)
+
+            # DA3 function, mask array is true for pixels that aren't sky and whose confidence is better than half the other non-sky pixels
+            mask_3d = compute_alignment_mask(
+                c_prev_3d, non_sky_mask_3d, d_prev_3d, d_curr_3d, median_conf
+            ) # [1, H, W] boolean mask
+            mask = mask_3d.squeeze(0) # [H, W]
+        else:
+            mask = non_sky_mask # [H, W]
+
+        # make sure there are at least 11 valid pixels (ie. there were originally at least 22 non-sky pixels before we chose the best half)
+        if mask.sum() > 10:
+            valid_prev_depths.append(d_prev[mask]) # [num_valid_pixels]
+            valid_curr_depths.append(d_curr[mask]) # [num_valid_pixels]
+        
+        E_prev = _extrinsic_to_4x4_torch(prev_ext[idx_prev]) # 4x4 camera transform matrix for this frame in previous batch
+        E_curr = _extrinsic_to_4x4_torch(curr_ext[idx_curr]) # 4x4 camera transform matrix for this frame in current batch
+        
+        transforms.append((E_prev, E_curr))
+
+    # All overlap frames have now been processed
+    # Compute global scale factor
+    if valid_prev_depths:
+        all_prev = torch.cat(valid_prev_depths) # [total_valid_pixels]
+        all_curr = torch.cat(valid_curr_depths) # [total_valid_pixels]
+        # least_squares_scale_scalar(target, source) returns scale such that source * scale ≈ target
+        # We want curr_depth * scale ≈ prev_depth, so target=all_prev, source=all_curr
+        scale = least_squares_scale_scalar(all_prev, all_curr)
+    else:
+        scale = torch.tensor(1.0) # 1x scale if there were no overlap frames with at least 22 non-sky pixels
+        
+    scale_val = float(scale.item())
+    print(f"Batch alignment: scale={scale_val}")
+    
+    # Step 1: Scale depth and extrinsic translations together (like DA3 does)
+    # This handles all scaling in one place
+    curr_pred.depth = _to_numpy(curr_depth * scale)
+    curr_ext[:, :, 3] = curr_ext[:, :, 3] * scale  # scale all translations
+    
+    # Step 2: Compute rigid alignment transform from first overlap frame
+    # We want to find T such that: E_curr_scaled @ T ≈ E_prev
+    # Rearranging: T = inv(E_curr_scaled) @ E_prev
+    E_prev, E_curr_orig = transforms[0]
+    E_curr_scaled = _extrinsic_to_4x4_torch(curr_ext[curr_indices.index(common_indices[0])])
+    T_align = _invert_4x4_torch(E_curr_scaled) @ E_prev
+    
+    # Step 3: Apply rigid alignment to all extrinsics
+    # E_new = E_curr_scaled @ T
+    new_extrinsics = []
+    for ext_3x4 in curr_ext:
+        E_curr = _extrinsic_to_4x4_torch(ext_3x4)
+        E_new = E_curr @ T_align
+        new_extrinsics.append(E_new[:3, :4])
+        
+    curr_pred.extrinsics = _to_numpy(torch.stack(new_extrinsics))
+    
+    return curr_pred
+
+# Transform and scale each batch to align with previous batch
+# all_predictions is list of (prediction_for_batch, frame_indices_for_batch)
+# prediction_for_batch is the result returned by run_model, and is class depth_anything_3.specs.Prediction
+# and has these fields: ['depth', 'is_metric', 'sky', 'conf', 'extrinsics', 'intrinsics', 'processed_images', 'gaussians', 'aux', 'scale_factor']
 def align_batches(all_predictions):
     if not all_predictions:
         return []
@@ -109,132 +248,7 @@ def align_batches(all_predictions):
     for i in range(1, len(all_predictions)):
         curr_pred_orig, curr_indices = all_predictions[i]
         
-        # Shallow copy to avoid modifying original
-        import copy
-        curr_pred = copy.copy(curr_pred_orig)
-        
-        curr_depth = _to_tensor(curr_pred.depth).float() # depth of every pixel in every image in the batch
-        curr_conf = _to_tensor(curr_pred.conf).float() # confidence of depth of every pixel in every image in the batch, range 0 to more than 1
-        curr_ext = _to_tensor(curr_pred.extrinsics) # camera position and rotation for every image in the batch (or None for Metric/Mono model)
-        if curr_ext is not None:
-            curr_ext = curr_ext.float()
-        
-        # Alignment for Metric/Mono model is not supported yet. TODO: still align the depth based on overlap images
-        if curr_ext is None:
-            print(f"Batch {i} has no extrinsics, skipping alignment.")
-            aligned_predictions.append(curr_pred)
-            prev_pred = curr_pred
-            prev_indices = curr_indices
-            continue
-
-        # depths, depth confidences, and camera poses for all images in the previous batch
-        prev_depth = _to_tensor(prev_pred.depth).float()
-        prev_conf = _to_tensor(prev_pred.conf).float()
-        prev_ext = _to_tensor(prev_pred.extrinsics).float()
-        
-        # Find overlapping indices
-        common_indices = set(prev_indices) & set(curr_indices)
-        if not common_indices:
-            print(f"Warning: Batch {i} has no overlap with Batch {i-1}. Alignment may be poor.")
-            aligned_predictions.append(curr_pred)
-            prev_pred = curr_pred
-            prev_indices = curr_indices
-            continue
-            
-        # Sort common indices to ensure deterministic order
-        common_indices = sorted(list(common_indices))
-        
-        # Collect valid pixels for depth scaling
-        valid_prev_depths = []
-        valid_curr_depths = []
-        
-        # Collect transforms for extrinsic alignment
-        transforms = []
-
-        # for each overlapping frame
-        for global_idx in common_indices:
-            # Find local index in prev and curr
-            idx_prev = prev_indices.index(global_idx)
-            idx_curr = curr_indices.index(global_idx)
-            
-            d_prev = prev_depth[idx_prev] # [H, W] depth of every pixel for this frame in the previous batch
-            d_curr = curr_depth[idx_curr] # [H, W] depth of every pixel for this frame in the current batch
-            c_prev = prev_conf[idx_prev]  # [H, W] confidence of every pixel for this frame in the previous batch
-            
-            # We only want to calculate scale from pixels that aren't sky
-            # For Metric/Mono/Nested models use the returned sky mask
-            # For base models there is no sky mask, so assume all pixels are non-sky
-            non_sky_mask = torch.ones_like(d_prev, dtype=torch.bool) # [H, W]
-            if hasattr(prev_pred, 'sky') and prev_pred.sky is not None:
-                 non_sky_mask = non_sky_mask & compute_sky_mask(_to_tensor(prev_pred.sky)[idx_prev], threshold=0.3)
-            if hasattr(curr_pred, 'sky') and curr_pred.sky is not None:
-                 non_sky_mask = non_sky_mask & compute_sky_mask(_to_tensor(curr_pred.sky)[idx_curr], threshold=0.3)
-            
-            # Use compute_alignment_mask for robust pixel selection
-            # Ensure inputs are at least 3D [1, H, W] for the utils
-            d_prev_3d = d_prev.unsqueeze(0)
-            d_curr_3d = d_curr.unsqueeze(0)
-            c_prev_3d = c_prev.unsqueeze(0)
-            non_sky_mask_3d = non_sky_mask.unsqueeze(0)
-            
-            c_prev_ns = c_prev[non_sky_mask] # [num_non_sky_pixels]
-            if c_prev_ns.numel() > 0:
-                c_prev_sampled = sample_tensor_for_quantile(c_prev_ns, max_samples=100000) # if there are more than 100,000 non-sky pixels, randomly select 100,000 of them
-                median_conf = torch.quantile(c_prev_sampled, 0.5) # calculate the median confidence (half the pixels have higher confidence than this, half have lower confidence)
-
-                # DA3 function, mask array is true for pixels that aren't sky and whose confidence is better than half the other non-sky pixels
-                mask_3d = compute_alignment_mask(
-                    c_prev_3d, non_sky_mask_3d, d_prev_3d, d_curr_3d, median_conf
-                ) # [1, H, W] boolean mask
-                mask = mask_3d.squeeze(0) # [H, W]
-            else:
-                mask = non_sky_mask # [H, W]
-
-            # make sure there are at least 11 valid pixels (ie. there were originally at least 22 non-sky pixels before we chose the best half)
-            if mask.sum() > 10:
-                valid_prev_depths.append(d_prev[mask]) # [num_valid_pixels]
-                valid_curr_depths.append(d_curr[mask]) # [num_valid_pixels]
-            
-            E_prev = _extrinsic_to_4x4_torch(prev_ext[idx_prev]) # 4x4 camera transform matrix for this frame in previous batch
-            E_curr = _extrinsic_to_4x4_torch(curr_ext[idx_curr]) # 4x4 camera transform matrix for this frame in current batch
-            
-            transforms.append((E_prev, E_curr))
-
-        # All overlap frames have now been processed
-        # Compute global scale factor
-        if valid_prev_depths:
-            all_prev = torch.cat(valid_prev_depths) # [total_valid_pixels]
-            all_curr = torch.cat(valid_curr_depths) # [total_valid_pixels]
-            # least_squares_scale_scalar(target, source) returns scale such that source * scale ≈ target
-            # We want curr_depth * scale ≈ prev_depth, so target=all_prev, source=all_curr
-            scale = least_squares_scale_scalar(all_prev, all_curr)
-        else:
-            scale = torch.tensor(1.0) # 1x scale if there were no overlap frames with at least 22 non-sky pixels
-            
-        scale_val = float(scale.item())
-        print(f"Batch {i} alignment: scale={scale_val}")
-        
-        # Step 1: Scale depth and extrinsic translations together (like DA3 does)
-        # This handles all scaling in one place
-        curr_pred.depth = _to_numpy(curr_depth * scale)
-        curr_ext[:, :, 3] = curr_ext[:, :, 3] * scale  # scale all translations
-        
-        # Step 2: Compute rigid alignment transform from first overlap frame
-        # We want to find T such that: E_curr_scaled @ T ≈ E_prev
-        # Rearranging: T = inv(E_curr_scaled) @ E_prev
-        E_prev, E_curr_orig = transforms[0]
-        E_curr_scaled = _extrinsic_to_4x4_torch(curr_ext[curr_indices.index(common_indices[0])])
-        T_align = _invert_4x4_torch(E_curr_scaled) @ E_prev
-        
-        # Step 3: Apply rigid alignment to all extrinsics
-        # E_new = E_curr_scaled @ T
-        new_extrinsics = []
-        for ext_3x4 in curr_ext:
-            E_curr = _extrinsic_to_4x4_torch(ext_3x4)
-            E_new = E_curr @ T_align
-            new_extrinsics.append(E_new[:3, :4])
-            
-        curr_pred.extrinsics = _to_numpy(torch.stack(new_extrinsics))
+        curr_pred = align_single_batch(curr_pred_orig, curr_indices, prev_pred, prev_indices)
         
         # Add the aligned prediction for this batch to the result list
         aligned_predictions.append(curr_pred)
@@ -374,7 +388,7 @@ def compute_motion_scores(predictions, threshold_ratio=0.1):
         b_idx, f_idx = frame_mapping[i]
         predictions[b_idx].motion[f_idx] = full_motion.reshape(H, W)
 
-def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images=False, segmentation_data=None, class_names=None):
+def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images=False, segmentation_data=None, class_names=None, progress_callback=None):
     predictions = {}
 
     # images is already numpy in your current pipeline
@@ -568,12 +582,25 @@ def convert_prediction_to_dict(prediction, image_paths=None, output_debug_images
     if prediction.extrinsics is None or prediction.intrinsics is None:
         raise ValueError("Prediction has no camera parameters; cannot create world-space point cloud.")
 
-    world_points = unproject_depth_map_to_point_map(
-        predictions['depth'],
-        predictions['extrinsic'],
-        predictions['intrinsic'],
-    )
+    cancelled = False
+    def unproject_progress_callback(progress):
+        nonlocal cancelled
+        if progress_callback:
+            if progress_callback(50 + progress / 2):
+                cancelled = True
+                return True
+        return False
+
+    world_points = unproject_depth_map_to_point_map(predictions['depth'], predictions['extrinsic'], predictions['intrinsic'], unproject_progress_callback)
+
+    if cancelled:
+        return None
+
     predictions["world_points_from_depth"] = world_points
+
+    if progress_callback:
+        progress_callback(100)
+
     return predictions
 
 # Based on da3_repo/src/depth_anything_3/model/da3.py
@@ -938,31 +965,52 @@ def create_point_cloud_object(name, points, colors, confs, motions=None, collect
     add_point_cloud_geo_nodes(obj, mat)
     return obj
 
+def apply_edge_filtering(prediction, filter_edges=True, edge_confidence=0.0):
+    """
+    Apply edge filtering to prediction confidence based on depth gradients.
+    Sets confidence to 0 for pixels with high depth gradient (edges).
+    
+    Args:
+        prediction: Prediction object with depth and conf attributes
+        filter_edges: Whether to apply filtering
+    """
+    if not filter_edges or not hasattr(prediction, 'depth') or prediction.depth is None:
+        return
+        
+    try:
+        import cv2
+        depth = prediction.depth
+        conf = prediction.conf
+        
+        for i in range(len(depth)):
+            dm = depth[i].astype(np.float32)  # Ensure float32 for OpenCV Sobel
+            gx = cv2.Sobel(dm, cv2.CV_64F, 1, 0, ksize=3)
+            gy = cv2.Sobel(dm, cv2.CV_64F, 0, 1, ksize=3)
+            mag = np.sqrt(gx**2 + gy**2)
+            mn, mx = np.nanmin(mag), np.nanmax(mag)
+            if mx > mn:
+                norm = (mag - mn) / (mx - mn)
+            else:
+                norm = np.zeros_like(mag)
+            
+            # Set confidence to 0 if normalized gradient >= 12/255
+            mask = norm >= (12.0 / 255.0)
+            conf[i][mask] = edge_confidence
+    except Exception as e:
+        print(f"Failed to filter confidence by gradient: {e}")
+
 def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5, global_indices=None):
+    # Apply edge filtering if requested
+    if isinstance(d, dict) and filter_edges:
+        # For dict format (legacy), apply filtering here
+        apply_edge_filtering(type('Prediction', (), d), filter_edges)
+    elif hasattr(d, 'depth') and hasattr(d, 'conf') and filter_edges:
+        # For prediction objects, apply filtering
+        apply_edge_filtering(d, filter_edges)
+    
     points = d["world_points_from_depth"]
     images = d["images"]
     conf = d["conf"]
-
-    # Filter confidence based on depth gradient
-    if filter_edges and "depth" in d:
-        try:
-            depth = d["depth"]
-            for i in range(len(depth)):
-                dm = depth[i]
-                gx = cv2.Sobel(dm, cv2.CV_64F, 1, 0, ksize=3)
-                gy = cv2.Sobel(dm, cv2.CV_64F, 0, 1, ksize=3)
-                mag = np.sqrt(gx**2 + gy**2)
-                mn, mx = np.nanmin(mag), np.nanmax(mag)
-                if mx > mn:
-                    norm = (mag - mn) / (mx - mn)
-                else:
-                    norm = np.zeros_like(mag)
-                
-                # Set confidence to 0 if normalized gradient >= 12/255
-                mask = norm >= (12.0 / 255.0)
-                conf[i][mask] = 0.0
-        except Exception as e:
-            print(f"Failed to filter confidence by gradient: {e}")
 
     if 'seg_id_map' in d:
         seg_id_map = d['seg_id_map'] # [N, H, W]
@@ -1172,9 +1220,11 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
     T = np.diag([1.0, -1.0, -1.0, 1.0])
     for i in range(num_cameras):
         # Name from image file if available
+        image_path_i = None
         if image_paths and i < len(image_paths):
             import os
-            base_name = os.path.splitext(os.path.basename(image_paths[i]))[0]
+            image_path_i = image_paths[i]
+            base_name = os.path.splitext(os.path.basename(image_path_i))[0]
             cam_name = base_name
         else:
             cam_name = f"Camera_{i}"
@@ -1197,6 +1247,32 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
             scene.collection.objects.link(cam_obj)
         
         ext = predictions["extrinsic"][i]
+
+        # Debug print: filename + intrinsics/extrinsics per camera
+        try:
+            K_dbg = np.asarray(K, dtype=np.float64)
+            ext_dbg = np.asarray(ext, dtype=np.float64)
+            K_str = np.array2string(K_dbg, precision=6, suppress_small=False)
+            ext_str = np.array2string(ext_dbg, precision=6, suppress_small=False)
+            print(
+                "[DA3] Camera {idx}: name={name} file={file} img={w}x{h} lens={lens:.6f} shift=({sx:.6f},{sy:.6f})\n"
+                "  K={K}\n"
+                "  extrinsic_w2c_3x4={E}".format(
+                    idx=i,
+                    name=cam_name,
+                    file=(image_path_i if image_path_i is not None else "<none>"),
+                    w=image_width,
+                    h=image_height,
+                    lens=float(cam_data.lens),
+                    sx=float(cam_data.shift_x),
+                    sy=float(cam_data.shift_y),
+                    K=K_str,
+                    E=ext_str,
+                )
+            )
+        except Exception as _e:
+            print(f"[DA3] Camera {i}: debug print failed: {_e}")
+
         E = np.vstack((ext, [0, 0, 0, 1]))
         E_inv = np.linalg.inv(E)
         M = np.dot(E_inv, T)

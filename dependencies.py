@@ -1,5 +1,6 @@
 import os
 import pkg_resources
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,7 @@ deps_path_da3 = add_on_path / 'deps_da3'
 sys.path.insert(0, os.fspath(deps_path))
 sys.path.insert(0, os.fspath(deps_path_da3))
 sys.path.insert(0, os.fspath(DA3_DIR))
+OPENCV_PINNED = "opencv-python==4.11.0.86"
 
 
 class Dependencies:
@@ -33,11 +35,21 @@ class Dependencies:
         # Create folder into which pip will install dependencies
         if not os.path.exists(DA3_DIR):
             try:
-                subprocess.check_call(['git', 'clone', 'https://github.com/ByteDance-Seed/Depth-Anything-3.git', DA3_DIR])
+                subprocess.check_call([
+                    'git',
+                    'clone',
+                    '--recursive',
+                    'https://github.com/ByteDance-Seed/Depth-Anything-3.git',
+                    os.fspath(DA3_DIR),
+                ])
             except subprocess.CalledProcessError as e:
                 print(f'Caught Exception while trying to git clone da3')
                 print(f'  Exception: {e}')
                 return False
+
+        # Ensure submodules are present (covers previous non-recursive clones)
+        if not Dependencies._update_submodules():
+            return False
         
         try:
             deps_path.mkdir(exist_ok=True)
@@ -76,6 +88,8 @@ class Dependencies:
             ]
             print(f'Installing: {cmd}')
             subprocess.check_call(cmd)
+            # Force the pinned OpenCV to avoid newer wheels pulling numpy>=2
+            Dependencies._ensure_pinned_opencv()
         except subprocess.CalledProcessError as e:
             print(f'Caught CalledProcessError while trying to install dependencies')
             print(f'  Exception: {e}')
@@ -102,7 +116,151 @@ class Dependencies:
             print(f'  Exception: {e}')
             print(f'  Requirements: {DA3_DIR}')
             return False
+        # Install streaming dependencies
+        if not Dependencies.install_streaming_deps():
+            print("Warning: Streaming dependencies installation failed, but continuing.")
         return Dependencies.check(force=True)
+
+    @staticmethod
+    def update_da3_repo():
+        """Pull the latest DA3 repo (with submodules) and reinstall into deps_da3."""
+        try:
+            if not DA3_DIR.exists() or not (DA3_DIR / ".git").exists():
+                print('DA3 repo missing, cloning recursively...')
+                subprocess.check_call([
+                    'git',
+                    'clone',
+                    '--recursive',
+                    'https://github.com/ByteDance-Seed/Depth-Anything-3.git',
+                    os.fspath(DA3_DIR),
+                ])
+            else:
+                subprocess.check_call(['git', '-C', os.fspath(DA3_DIR), 'pull', '--ff-only'])
+                if not Dependencies._update_submodules():
+                    return False
+
+            # Reinstall DA3 into deps_da3 to keep it in sync with the working tree
+            if deps_path_da3.exists():
+                shutil.rmtree(deps_path_da3)
+            deps_path_da3.mkdir(exist_ok=True)
+
+            cmd = [
+                sys.executable,
+                '-m',
+                'pip',
+                'install',
+                '--no-deps',
+                os.fspath(DA3_DIR),
+                '--target',
+                os.fspath(deps_path_da3),
+            ]
+            print(f'Installing updated DA3 into deps_da3: {cmd}')
+            subprocess.check_call(cmd)
+
+            Dependencies._checked = None
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f'Caught CalledProcessError while updating DA3 repo')
+            print(f'  Exception: {e}')
+            return False
+        except Exception as e:
+            print(f'Caught Exception while updating DA3 repo')
+            print(f'  Exception: {e}')
+            return False
+
+    @staticmethod
+    def install_streaming_deps():
+        """Install DA3-Streaming extra requirements into deps_public with fallbacks."""
+        try:
+            # Try to install faiss-gpu first
+            cmd = [
+                sys.executable,
+                '-m',
+                'pip',
+                'install',
+                'faiss-gpu',
+                'numpy==1.26.4',  # Pin numpy to prevent version conflicts
+                '--target',
+                os.fspath(deps_path),
+            ]
+            print(f'Installing faiss-gpu: {cmd}')
+            subprocess.check_call(cmd)
+            Dependencies._ensure_pinned_opencv()
+            return True
+        except subprocess.CalledProcessError as e:
+            print('faiss-gpu install failed, falling back to faiss-cpu...')
+            try:
+                # Fallback: install faiss-cpu and other deps
+                fallback_cmds = [
+                    [
+                        sys.executable,
+                        '-m',
+                        'pip',
+                        'install',
+                        'faiss-cpu',
+                        'numpy==1.26.4',  # Pin numpy to prevent version conflicts
+                        '--target',
+                        os.fspath(deps_path),
+                    ],
+                ]
+                for fc in fallback_cmds:
+                    print(f'Installing streaming fallback: {fc}')
+                    subprocess.check_call(fc)
+                Dependencies._ensure_pinned_opencv()
+                return True
+            except subprocess.CalledProcessError as e2:
+                print(f'Fallback streaming deps install failed: {e2}')
+                return False
+        except Exception as e:
+            print(f'Caught Exception while installing streaming deps: {e}')
+            return False
+
+    @staticmethod
+    def _ensure_pinned_opencv():
+        """Force reinstall of the pinned OpenCV version to avoid numpy>=2 pulls from newer wheels."""
+        try:
+            cmd = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--force-reinstall",
+                OPENCV_PINNED,
+                "numpy==1.26.4",  # Pin numpy to prevent version conflicts
+                "--target",
+                os.fspath(deps_path),
+            ]
+            print(f'Ensuring pinned OpenCV: {cmd}')
+            subprocess.check_call(cmd)
+        except subprocess.CalledProcessError as e:
+            print(f'Warning: failed to enforce pinned OpenCV ({OPENCV_PINNED}): {e}')
+
+    @staticmethod
+    def _update_submodules():
+        """Update all submodules including nested .gitmodules under da3_streaming."""
+        try:
+            # Root-level submodules
+            subprocess.check_call([
+                'git', '-C', os.fspath(DA3_DIR), 'submodule', 'update', '--init', '--recursive'
+            ])
+            # Handle nested .gitmodules under da3_streaming if present
+            streaming_dir = DA3_DIR / 'da3_streaming'
+            gitmodules_path = streaming_dir / '.gitmodules'
+            if gitmodules_path.exists():
+                subprocess.check_call([
+                    'git', '-C', os.fspath(streaming_dir), 'submodule', 'update', '--init', '--recursive'
+                ])
+                # Fallback: ensure salad submodule exists even if nested update didn’t populate
+                salad_path = streaming_dir / 'loop_utils' / 'salad'
+                if not salad_path.exists():
+                    subprocess.check_call([
+                        'git', 'clone', 'https://github.com/serizba/salad.git', os.fspath(salad_path)
+                    ])
+            return True
+        except subprocess.CalledProcessError as e:
+            print('Caught Exception while trying to update submodules (including da3_streaming)')
+            print(f'  Exception: {e}')
+            return False
 
     @staticmethod
     def check(*, force=False):
