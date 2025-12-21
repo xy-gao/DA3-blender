@@ -43,9 +43,7 @@ https://github.com/user-attachments/assets/6eeff6d0-a89f-4c2c-970b-47fe2b5475d3
 
 ## Tested on
 - Win10, Win11
-- Blender 4.2, 4.4
-- cuda 12.6
+- Blender 4.2, 4.4, 5.0
+- cuda 12.6, 13.0
 - 4GB VRAM GTX 970
-
-also tested on Ubuntu 25.10, Blender 5.0, CUDA 13.0 https://github.com/xy-gao/DA3-blender/issues/1#issue-3652866452
 
