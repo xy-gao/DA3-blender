@@ -878,6 +878,7 @@ Model:
 
   save_depth_conf_result: True
   save_debug_info: {str(self.streaming_save_debug).lower()}
+  use_ray_pose: {str(self.use_ray_pose).lower()}
 
   Sparse_Align:
     keypoint_select: 'orb'
@@ -1459,6 +1460,7 @@ Loop:
                                 metric_first_chunk_prediction = metric_model.inference(
                                     sample_paths,
                                     ref_view_strategy=self.ref_view_strategy,
+                                    use_ray_pose=self.use_ray_pose,
                                 )
                             metric_model = None
                             unload_current_model()
@@ -1489,6 +1491,7 @@ Loop:
                         segmentation_data=all_segmentation_data,
                         segmentation_class_names=segmentation_class_names,
                         metric_first_chunk_prediction=metric_first_chunk_prediction,
+                        use_ray_pose=self.use_ray_pose,
                     )
                     # Return both the combined PLY and the per-chunk PCD directory
                     self.result_queue.put({

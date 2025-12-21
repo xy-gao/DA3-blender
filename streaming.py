@@ -260,7 +260,7 @@ CONFIG_NAME_MAP = {
     "da3nested-giant-large-1.1": "da3nested-giant-large",
 }
 
-def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size: int, ref_view_strategy: str = "saddle_balanced", loop_enable: bool = True, use_db_ow: bool = False, align_lib: str = "torch", align_method: str = "sim3", depth_threshold: float = 15.0, save_debug: bool = False, conf_threshold_coef: float = 0.75) -> dict:
+def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size: int, ref_view_strategy: str = "saddle_balanced", loop_enable: bool = True, use_db_ow: bool = False, align_lib: str = "torch", align_method: str = "sim3", depth_threshold: float = 15.0, save_debug: bool = False, conf_threshold_coef: float = 0.75, use_ray_pose: bool = False) -> dict:
     model_path = os.path.abspath(model_path)
     model_dir = Path(model_path).parent
 
@@ -287,6 +287,7 @@ def build_config(model_path: str, chunk_size: int, overlap: int, loop_chunk_size
             "depth_threshold": depth_threshold,
             "save_depth_conf_result": True,
             "save_debug_info": save_debug,
+            "use_ray_pose": use_ray_pose,
             "Sparse_Align": {
                 "keypoint_select": "orb",
                 "keypoint_num": 5000,
@@ -631,7 +632,7 @@ class DA3_Modified_Streaming:
                 images = chunk_image_paths
                 # images: ['xxx.png', 'xxx.png', ...]
 
-                predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy)
+                predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy, use_ray_pose=self.config["Model"]["use_ray_pose"])
 
                 def _as_numpy(x, dtype=None):
                     if x is None:
@@ -1596,6 +1597,7 @@ def run_streaming(
     conf_threshold_coef: float = 0.75,
     filter_edges: bool = True,
     metric_first_chunk_prediction=None,
+    use_ray_pose: bool = False,
 ) -> dict:
     if not os.path.isdir(image_dir):
         raise ValueError(f"Image directory does not exist: {image_dir}")
@@ -1607,7 +1609,7 @@ def run_streaming(
     os.makedirs(output_dir, exist_ok=True)
 
     loop_chunk_size = overlap
-    config = build_config(model_path, chunk_size, overlap, loop_chunk_size, ref_view_strategy, loop_enable, use_db_ow, align_lib, align_method, depth_threshold, save_debug, conf_threshold_coef)
+    config = build_config(model_path, chunk_size, overlap, loop_chunk_size, ref_view_strategy, loop_enable, use_db_ow, align_lib, align_method, depth_threshold, save_debug, conf_threshold_coef, use_ray_pose)
 
     if config["Model"].get("align_lib", "") == "numba":
         warmup_numba()
