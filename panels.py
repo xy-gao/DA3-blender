@@ -57,7 +57,7 @@ class DA3Panel(bpy.types.Panel):
                         op.da3_override_model_name = metric_model_name
 
         # Input folder stays prominent
-        layout.prop(scene, "da3_input_folder", text="Input Folder")
+        layout.prop(scene, "da3_input_folder", text="Input Folder / Video")
 
         # --- Resolution (non-collapsible) ---
         res_box = layout.box()
@@ -137,6 +137,8 @@ class DA3Panel(bpy.types.Panel):
                 sm_box.separator()
 
         layout.prop(scene, "da3_generate_mesh", text="Generate Meshes")
+        if scene.da3_generate_mesh:
+            layout.prop(scene, "da3_animate_sequence", text="Animate Sequence")
         layout.prop(scene, "da3_output_debug_images", text="Output Debug Images")
         row = layout.row()
         row.operator("da3.generate_point_cloud")

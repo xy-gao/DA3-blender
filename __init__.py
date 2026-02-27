@@ -162,7 +162,11 @@ def register_classes():
         default=True,
     )
 
-    bpy.types.Scene.da3_input_folder = bpy.props.StringProperty(subtype='DIR_PATH')
+    bpy.types.Scene.da3_input_folder = bpy.props.StringProperty(
+        name="Input Folder / Video",
+        description="Folder of images (JPG/PNG) or a video file (mp4, mov, avi, …)",
+        subtype='FILE_PATH',
+    )
     bpy.types.Scene.da3_streaming_output = bpy.props.StringProperty(
         name="Output",
         description="Folder to store DA3-Streaming results",
@@ -342,6 +346,11 @@ def register_classes():
         description="Generate independent textured meshes for each input image instead of a point cloud",
         default=False,
     )
+    bpy.types.Scene.da3_animate_sequence = bpy.props.BoolProperty(
+        name="Animate Sequence",
+        description="Keyframe each camera and mesh to be visible only on its corresponding Blender timeline frame",
+        default=False,
+    )
     bpy.types.Scene.da3_detect_motion = bpy.props.BoolProperty(
         name="Detect Motion",
         description="Identify and animate moving objects by checking if they're missing in other frames",
@@ -428,6 +437,7 @@ def unregister_classes():
     del bpy.types.Scene.da3_min_confidence
     del bpy.types.Scene.da3_output_debug_images
     del bpy.types.Scene.da3_generate_mesh
+    del bpy.types.Scene.da3_animate_sequence
     del bpy.types.Scene.da3_detect_motion
     del bpy.types.Scene.da3_motion_threshold
     del bpy.types.Scene.da3_use_segmentation
