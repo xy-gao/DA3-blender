@@ -112,7 +112,7 @@ class DA3AddonPreferences(bpy.types.AddonPreferences):
         name="Model Folder",
         description="Custom folder to store downloaded models. If empty, uses default addon folder.",
         subtype='DIR_PATH',
-        default=""
+        default=DEFAULT_MODELS_DIR
     )
 
     def draw(self, context):
