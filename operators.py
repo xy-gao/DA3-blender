@@ -32,21 +32,67 @@ from plyfile import PlyData
 from . import DEFAULT_MODELS_DIR, get_configured_model_folder, get_prefs
 import types
 
+_VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.mts', '.mpg', '.mpeg'}
+
+
+def _extract_video_frames(video_path):
+    """Extract every frame of a video to a temporary directory as JPEGs.
+
+    Returns the temp directory path.  The caller is responsible for deleting it
+    (``shutil.rmtree``) when done.  Frame thinning is left to the addon's
+    existing Frame Stride logic so that parameter keeps working as expected.
+    """
+    import cv2
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video file: {video_path}")
+
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps   = cap.get(cv2.CAP_PROP_FPS)
+    print(f"[DA3] Video: {total} frames @ {fps:.2f} fps — extracting to temp dir...")
+
+    temp_dir = tempfile.mkdtemp(prefix="da3_video_")
+    extracted = 0
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            cv2.imwrite(
+                os.path.join(temp_dir, f"{extracted:06d}.jpg"),
+                frame,
+                [cv2.IMWRITE_JPEG_QUALITY, 95],
+            )
+            extracted += 1
+    finally:
+        cap.release()
+
+    if extracted == 0:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise RuntimeError("No frames could be read from the video file.")
+
+    print(f"[DA3] Extracted {extracted} frames to {temp_dir}")
+    return temp_dir
+
+
 def get_any_model_path(model_filename, context=None):
-    # Check configured folder first
     configured_folder = get_configured_model_folder(context)
-        
-    configured_path = os.path.join(configured_folder, model_filename)
-    if os.path.exists(configured_path):
-        return configured_path
-        
+
+    # Check configured folder first (only if actually set)
+    if configured_folder:
+        configured_path = os.path.join(configured_folder, model_filename)
+        if os.path.exists(configured_path):
+            return configured_path
+
     # Check default folder
     default_path = os.path.join(DEFAULT_MODELS_DIR, model_filename)
     if os.path.exists(default_path):
         return default_path
-        
-    # If not found, return configured path for download
-    return configured_path
+
+    # Not found anywhere — return best absolute path to use as download destination
+    if configured_folder:
+        return configured_path
+    return default_path
 
 _URLS = {
     'da3-small': "https://huggingface.co/depth-anything/DA3-SMALL/resolve/main/model.safetensors",
@@ -726,6 +772,8 @@ class GeneratePointCloudOperator(bpy.types.Operator):
     error_message = ""
     stop_event = None
     result_queue = None
+    _video_temp_dir = None      # temp dir created when input is a video file
+    _input_display_name = None  # friendly name for Blender collections
     
     total_predicted_time = None
     start_time = None
@@ -789,6 +837,7 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.segmentation_model = getattr(context.scene, "da3_segmentation_model", "yolo11x-seg")
         self.detect_motion = getattr(context.scene, "da3_detect_motion", False)
         self.motion_threshold = getattr(context.scene, "da3_motion_threshold", 0.1)
+        self.animate_sequence = getattr(context.scene, "da3_animate_sequence", False)
         
         # Prime the model folder cache in the main thread
         get_configured_model_folder(context)
@@ -796,9 +845,25 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         if self.process_res % 14 != 0:
             self.report({'ERROR'}, "Process resolution must be a multiple of 14.")
             return {'CANCELLED'}
-        
-        if not self.input_folder or not os.path.isdir(self.input_folder):
-            self.report({'ERROR'}, "Please select a valid input folder.")
+
+        if not self.input_folder:
+            self.report({'ERROR'}, "Please select an input folder or video file.")
+            return {'CANCELLED'}
+
+        self._video_temp_dir = None
+        self._input_display_name = None
+        input_path = Path(self.input_folder)
+        if input_path.suffix.lower() in _VIDEO_EXTENSIONS:
+            self._input_display_name = input_path.stem
+            self.report({'INFO'}, f"Extracting frames from {input_path.name}…")
+            try:
+                self._video_temp_dir = _extract_video_frames(self.input_folder)
+                self.input_folder = self._video_temp_dir
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to extract video frames: {e}")
+                return {'CANCELLED'}
+        elif not input_path.is_dir():
+            self.report({'ERROR'}, "Please select a valid input folder or video file.")
             return {'CANCELLED'}
 
         context.scene.da3_progress = 0
@@ -847,7 +912,8 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             "batch_indices": batch_indices,
             "generate_mesh": self.generate_mesh,
             "filter_edges": self.filter_edges,
-            "min_confidence": self.min_confidence
+            "min_confidence": self.min_confidence,
+            "animate_sequence": self.animate_sequence
         })
 
     def _write_streaming_config(self, model_path, chunk_size, overlap, loop_chunk_size, output_dir, ref_view_strategy):
@@ -1209,7 +1275,7 @@ Loop:
 
                             # Import as mesh or point cloud
                             if generate_mesh:
-                                import_mesh_from_depth(d, collection=target_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                                import_mesh_from_depth(d, collection=target_col, filter_edges=filter_edges, min_confidence=min_confidence, animate_sequence=self.animate_sequence)
                             else:
                                 import_point_cloud(d, collection=target_col, filter_edges=filter_edges, min_confidence=min_confidence)
                             try:
@@ -1274,7 +1340,7 @@ Loop:
                                 target_parent.children.link(chunk_col)
 
                                 if generate_mesh:
-                                    import_mesh_from_depth(d, collection=chunk_col, filter_edges=filter_edges, min_confidence=min_confidence)
+                                    import_mesh_from_depth(d, collection=chunk_col, filter_edges=filter_edges, min_confidence=min_confidence, animate_sequence=self.animate_sequence)
                                 else:
                                     import_point_cloud(d, collection=chunk_col, filter_edges=filter_edges, min_confidence=min_confidence)
 
@@ -1434,7 +1500,7 @@ Loop:
                     print("Segmentation failed or cancelled. Proceeding without segmentation.")
 
             # Prepare for import
-            folder_name = os.path.basename(os.path.normpath(self.input_folder))
+            folder_name = self._input_display_name or os.path.basename(os.path.normpath(self.input_folder))
             self.result_queue.put({"type": "INIT_COLLECTION", "folder_name": folder_name})
 
             # 1) run base model (or streaming pipeline)
@@ -1876,6 +1942,9 @@ Loop:
         wm.event_timer_remove(self.timer)
         # wm.progress_end()
         context.scene.da3_progress = -1
+        if self._video_temp_dir and os.path.isdir(self._video_temp_dir):
+            shutil.rmtree(self._video_temp_dir, ignore_errors=True)
+            self._video_temp_dir = None
 
     def process_batch(self, context, msg):
         try:
@@ -1886,6 +1955,7 @@ Loop:
             generate_mesh = msg["generate_mesh"]
             filter_edges = msg["filter_edges"]
             min_confidence = msg["min_confidence"]
+            animate_sequence = msg.get("animate_sequence", False)
             
             parent_col = self.parent_col
             if not parent_col:
@@ -1897,11 +1967,11 @@ Loop:
             parent_col.children.link(batch_col)
             
             if generate_mesh:
-                import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
+                import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices, animate_sequence=animate_sequence)
             else:
                 import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
-            
-            create_cameras(combined_predictions, collection=batch_col)
+
+            create_cameras(combined_predictions, collection=batch_col, animate_sequence=animate_sequence, global_indices=batch_indices)
         except Exception as e:
             # end_progress_timer()
             import traceback
@@ -1928,4 +1998,10 @@ Loop:
     def poll(cls, context):
         model_name = context.scene.da3_model_name
         model_path = get_model_path(model_name, context)
-        return os.path.exists(model_path) and context.scene.da3_input_folder != ""
+        if not os.path.exists(model_path):
+            return False
+        input_str = context.scene.da3_input_folder
+        if not input_str:
+            return False
+        p = Path(input_str)
+        return p.is_dir() or p.suffix.lower() in _VIDEO_EXTENSIONS

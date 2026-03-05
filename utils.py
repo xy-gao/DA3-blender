@@ -1193,7 +1193,32 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
         
         create_point_cloud_object("Points", points_batch, colors_batch, conf_batch, None, collection)
     
-def create_cameras(predictions, collection=None, image_width=None, image_height=None):
+def _frame_number_from_path(image_path, fallback_index):
+    """Return a 1-indexed Blender frame number for an image.
+    Parses the filename stem as an integer (treating it as 0-indexed source),
+    or falls back to fallback_index + 1."""
+    try:
+        from pathlib import Path
+        return int(Path(image_path).stem) + 1
+    except (ValueError, TypeError):
+        return fallback_index + 1
+
+
+def _keyframe_visibility(obj, frame_number):
+    """Keyframe obj so it is only visible at frame_number (1-indexed), hidden otherwise."""
+    for frame, hidden in [(0, True), (frame_number, False), (frame_number + 1, True)]:
+        obj.hide_viewport = hidden
+        obj.hide_render = hidden
+        obj.keyframe_insert(data_path="hide_viewport", frame=frame)
+        obj.keyframe_insert(data_path="hide_render", frame=frame)
+    if obj.animation_data and obj.animation_data.action:
+        for fcurve in obj.animation_data.action.fcurves:
+            if fcurve.data_path in ("hide_viewport", "hide_render"):
+                for kp in fcurve.keyframe_points:
+                    kp.interpolation = 'CONSTANT'
+
+
+def create_cameras(predictions, collection=None, image_width=None, image_height=None, animate_sequence=False, global_indices=None):
     scene = bpy.context.scene
     if image_width is None or image_height is None:
         H, W = predictions['images'].shape[1:3]
@@ -1279,6 +1304,13 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
         cam_obj.matrix_world = Matrix(M.tolist())
         R = Matrix.Rotation(math.radians(-90), 4, 'X')
         cam_obj.matrix_world = R @ cam_obj.matrix_world
+
+        if animate_sequence:
+            if image_path_i:
+                frame_num = _frame_number_from_path(image_path_i, global_indices[i] if global_indices is not None else i)
+            else:
+                frame_num = (global_indices[i] + 1) if global_indices is not None else (i + 1)
+            _keyframe_visibility(cam_obj, frame_num)
 
 def get_or_create_image_material(image_path):
     name = os.path.basename(image_path)
@@ -1397,7 +1429,7 @@ def add_filter_mesh_modifier(obj, min_confidence):
         
     mod.node_group = group
 
-def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence=0.5, global_indices=None):
+def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence=0.5, global_indices=None, animate_sequence=False):
     points = d["world_points_from_depth"] # [N, H, W, 3]
     images = d["images"] # [N, H, W, 3]
     conf = d["conf"] # [N, H, W]
@@ -1548,7 +1580,14 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                     target_col = obj_collections[base_obj_name]
                 
                 target_col.objects.link(obj)
-                
+
+                if animate_sequence:
+                    if "image_paths" in d and i < len(d["image_paths"]):
+                        frame_num = _frame_number_from_path(d["image_paths"][i], global_indices[i] if global_indices is not None else i)
+                    else:
+                        frame_num = (global_indices[i] + 1) if global_indices is not None else (i + 1)
+                    _keyframe_visibility(obj, frame_num)
+
                 # Material (Image)
                 if "image_paths" in d:
                     img_path = d["image_paths"][i]
@@ -1556,7 +1595,7 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                 else:
                     mat = get_or_create_point_material()
                 obj.data.materials.append(mat)
-                
+
                 if filter_edges:
                     add_filter_mesh_modifier(obj, min_confidence)
 
@@ -1642,26 +1681,33 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                     add_filter_mesh_modifier(obj, min_confidence)
                     
                 # Animation
-                spacing = 15
-                duration = 15
-                global_idx = global_indices[i] if global_indices is not None else i
-                start_frame = 1 + global_idx * spacing
-                end_frame = start_frame + duration
-                
-                obj.hide_viewport = True
-                obj.hide_render = True
-                obj.keyframe_insert(data_path="hide_viewport", frame=0)
-                obj.keyframe_insert(data_path="hide_render", frame=0)
-                
-                obj.hide_viewport = False
-                obj.hide_render = False
-                obj.keyframe_insert(data_path="hide_viewport", frame=start_frame)
-                obj.keyframe_insert(data_path="hide_render", frame=start_frame)
-                
-                obj.hide_viewport = True
-                obj.hide_render = True
-                obj.keyframe_insert(data_path="hide_viewport", frame=end_frame)
-                obj.keyframe_insert(data_path="hide_render", frame=end_frame)
+                if animate_sequence:
+                    if "image_paths" in d and i < len(d["image_paths"]):
+                        frame_num = _frame_number_from_path(d["image_paths"][i], global_indices[i] if global_indices is not None else i)
+                    else:
+                        frame_num = (global_indices[i] + 1) if global_indices is not None else (i + 1)
+                    _keyframe_visibility(obj, frame_num)
+                else:
+                    spacing = 15
+                    duration = 15
+                    global_idx = global_indices[i] if global_indices is not None else i
+                    start_frame = 1 + global_idx * spacing
+                    end_frame = start_frame + duration
+
+                    obj.hide_viewport = True
+                    obj.hide_render = True
+                    obj.keyframe_insert(data_path="hide_viewport", frame=0)
+                    obj.keyframe_insert(data_path="hide_render", frame=0)
+
+                    obj.hide_viewport = False
+                    obj.hide_render = False
+                    obj.keyframe_insert(data_path="hide_viewport", frame=start_frame)
+                    obj.keyframe_insert(data_path="hide_render", frame=start_frame)
+
+                    obj.hide_viewport = True
+                    obj.hide_render = True
+                    obj.keyframe_insert(data_path="hide_viewport", frame=end_frame)
+                    obj.keyframe_insert(data_path="hide_render", frame=end_frame)
 
             # --- Stationary Mesh ---
             # Face is stationary if ALL vertices are stationary (NOT moving)
@@ -1708,7 +1754,14 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                     collection.objects.link(obj)
                 else:
                     bpy.context.collection.objects.link(obj)
-                
+
+                if animate_sequence:
+                    if "image_paths" in d and i < len(d["image_paths"]):
+                        frame_num = _frame_number_from_path(d["image_paths"][i], global_indices[i] if global_indices is not None else i)
+                    else:
+                        frame_num = (global_indices[i] + 1) if global_indices is not None else (i + 1)
+                    _keyframe_visibility(obj, frame_num)
+
                 # Material (Image)
                 if "image_paths" in d:
                     img_path = d["image_paths"][i]
@@ -1716,7 +1769,7 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                 else:
                     mat = get_or_create_point_material()
                 obj.data.materials.append(mat)
-                
+
                 if filter_edges:
                     add_filter_mesh_modifier(obj, min_confidence)
 
@@ -1773,7 +1826,14 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                 collection.objects.link(obj)
             else:
                 bpy.context.collection.objects.link(obj)
-                
+
+            if animate_sequence:
+                if "image_paths" in d and i < len(d["image_paths"]):
+                    frame_num = _frame_number_from_path(d["image_paths"][i], global_indices[i] if global_indices is not None else i)
+                else:
+                    frame_num = (global_indices[i] + 1) if global_indices is not None else (i + 1)
+                _keyframe_visibility(obj, frame_num)
+
             # Add Material
             if "image_paths" in d:
                 img_path = d["image_paths"][i]
@@ -1781,7 +1841,7 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
             else:
                 mat = get_or_create_point_material()
             obj.data.materials.append(mat)
-                
+
             # Add Geometry Nodes to filter stretched edges and low confidence
             if filter_edges:
                 add_filter_mesh_modifier(obj, min_confidence)
