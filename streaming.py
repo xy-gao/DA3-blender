@@ -442,6 +442,8 @@ class DA3_Modified_Streaming:
         image_paths,
         config,
         model=None,
+        process_res=504,
+        process_res_method="upper_bound_resize",
         progress_callback=None,
         filter_edges=True,
         segmentation_data=None,
@@ -449,6 +451,9 @@ class DA3_Modified_Streaming:
         metric_first_chunk_prediction=None,
     ):
         self.config = config
+
+        self.process_res = process_res
+        self.process_res_method = process_res_method
 
         # Optional UI progress callback: callable(progress_float 0-100, message) -> bool to request stop
         self.progress_callback = progress_callback
@@ -632,7 +637,13 @@ class DA3_Modified_Streaming:
                 images = chunk_image_paths
                 # images: ['xxx.png', 'xxx.png', ...]
 
-                predictions = self.model.inference(images, ref_view_strategy=ref_view_strategy, use_ray_pose=self.config["Model"]["use_ray_pose"])
+                predictions = self.model.inference(
+                    images,
+                    process_res=self.process_res,
+                    process_res_method=self.process_res_method,
+                    ref_view_strategy=ref_view_strategy,
+                    use_ray_pose=self.config["Model"]["use_ray_pose"]
+                )
 
                 def _as_numpy(x, dtype=None):
                     if x is None:
@@ -1587,6 +1598,8 @@ def run_streaming(
     progress_callback=None,
     segmentation_data=None,
     segmentation_class_names=None,
+    process_res: int = 504,
+    process_res_method: str = "upper_bound_resize",
     ref_view_strategy: str = "saddle_balanced",
     loop_enable: bool = True,
     use_db_ow: bool = False,
@@ -1620,6 +1633,8 @@ def run_streaming(
         image_paths=image_paths,
         config=config,
         model=model,
+        process_res=process_res,
+        process_res_method=process_res_method,
         progress_callback=progress_callback,
         filter_edges=filter_edges,
         segmentation_data=segmentation_data,
