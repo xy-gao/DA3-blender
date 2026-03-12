@@ -1546,6 +1546,8 @@ Loop:
                         overlap=max(1, self.batch_size // 2),
                         model=base_model,
                         progress_callback=progress_callback,
+                        process_res=self.process_res,
+                        process_res_method=self.process_res_method,
                         ref_view_strategy=self.ref_view_strategy,
                         loop_enable=self.streaming_loop_enable,
                         use_db_ow=self.streaming_use_db_ow,
