@@ -1,5 +1,6 @@
 import glob
 import os
+import tempfile
 import numpy as np
 import bpy
 from mathutils import Matrix
@@ -875,23 +876,32 @@ def get_or_create_point_material():
         links.new(bsdf.outputs['BSDF'], output_node_material.inputs['Surface'])
     return mat
 
-def add_point_cloud_geo_nodes(obj, mat):
+def add_point_cloud_geo_nodes(obj, mat, scale=1.0):
     geo_mod = obj.modifiers.new(name="GeometryNodes", type='NODES')
     node_group = bpy.data.node_groups.new(name="PointCloud", type='GeometryNodeTree')
-    
+
     # Inputs
     node_group.interface.new_socket(name="Geometry", in_out="INPUT", socket_type="NodeSocketGeometry")
     node_group.interface.new_socket(name="Threshold", in_out="INPUT", socket_type="NodeSocketFloat")
     node_group.interface.items_tree[-1].default_value = 0.5
     node_group.interface.new_socket(name="Scale", in_out="INPUT", socket_type="NodeSocketFloat")
-    node_group.interface.items_tree[-1].default_value = 1.0
+    node_group.interface.items_tree[-1].default_value = scale
     node_group.interface.items_tree[-1].min_value = 0.0
     
     # Outputs
     node_group.interface.new_socket(name="Geometry", in_out="OUTPUT", socket_type="NodeSocketGeometry")
     
     geo_mod.node_group = node_group
-    
+
+    # Apply scale value to this modifier instance (override the node-group default)
+    try:
+        for item in node_group.interface.items_tree:
+            if item.name == "Scale":
+                geo_mod[item.identifier] = float(scale)
+                break
+    except Exception:
+        pass
+
     # Nodes
     input_node = node_group.nodes.new('NodeGroupInput')
     output_node = node_group.nodes.new('NodeGroupOutput')
@@ -930,7 +940,7 @@ def add_point_cloud_geo_nodes(obj, mat):
     node_group.links.new(delete_geo.outputs['Geometry'], set_material_node.inputs['Geometry'])
     node_group.links.new(set_material_node.outputs['Geometry'], output_node.inputs['Geometry'])
 
-def create_point_cloud_object(name, points, colors, confs, motions=None, collection=None):
+def create_point_cloud_object(name, points, colors, confs, motions=None, collection=None, scale=1.0):
     mesh = bpy.data.meshes.new(name=name)
     mesh.from_pydata(points.tolist(), [], [])
     
@@ -962,7 +972,7 @@ def create_point_cloud_object(name, points, colors, confs, motions=None, collect
     obj.data.materials.append(mat)
     
     # Geometry nodes setup
-    add_point_cloud_geo_nodes(obj, mat)
+    add_point_cloud_geo_nodes(obj, mat, scale=scale)
     return obj
 
 def apply_edge_filtering(prediction, filter_edges=True, edge_confidence=0.0):
@@ -999,7 +1009,7 @@ def apply_edge_filtering(prediction, filter_edges=True, edge_confidence=0.0):
     except Exception as e:
         print(f"Failed to filter confidence by gradient: {e}")
 
-def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5, global_indices=None):
+def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5, global_indices=None, per_frame_geometry=False, point_scale=1.0):
     # Apply edge filtering if requested
     if isinstance(d, dict) and filter_edges:
         # For dict format (legacy), apply filtering here
@@ -1171,7 +1181,39 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
         if stationary_points:
             create_point_cloud_object("Points", np.vstack(stationary_points), np.vstack(stationary_colors), np.concatenate(stationary_confs), np.concatenate(stationary_motions), collection)
 
+    elif per_frame_geometry:
+        # Per-frame mode: one point cloud per frame with keyframed visibility
+        N = points.shape[0]
+        for i in range(N):
+            p = points[i].reshape(-1, 3)
+            reordered = p.copy()
+            reordered[:, [0, 1, 2]] = p[:, [0, 2, 1]]
+            reordered[:, 2] = -reordered[:, 2]
+            c = images[i].reshape(-1, 3)
+            c = np.hstack((c, np.ones((c.shape[0], 1))))
+            cf = conf[i].reshape(-1)
+
+            if min_confidence > 0:
+                mask = cf >= min_confidence
+                reordered = reordered[mask]
+                c = c[mask]
+                cf = cf[mask]
+
+            if len(cf) == 0:
+                continue
+
+            if "image_paths" in d and i < len(d["image_paths"]):
+                name = os.path.splitext(os.path.basename(d["image_paths"][i]))[0]
+                frame_num = _frame_number_from_path(d["image_paths"][i], global_indices[i] if global_indices is not None else i)
+            else:
+                name = f"Points_frame_{i}"
+                frame_num = (global_indices[i] + 1) if global_indices is not None else (i + 1)
+
+            obj = create_point_cloud_object(name, reordered, c, cf, None, collection, scale=point_scale)
+            _keyframe_visibility(obj, frame_num)
+
     else:
+        # Combined mode (default): merge all frames into one object
         points_batch = points.reshape(-1, 3)
         reordered_points_batch = points_batch.copy()
         reordered_points_batch[:, [0, 1, 2]] = points_batch[:, [0, 2, 1]]
@@ -1180,18 +1222,17 @@ def import_point_cloud(d, collection=None, filter_edges=True, min_confidence=0.5
         colors_batch = images.reshape(-1, 3)
         colors_batch = np.hstack((colors_batch, np.ones((colors_batch.shape[0], 1))))
         conf_batch = conf.reshape(-1)
-        
-        # Remove points with low confidence
+
         if min_confidence > 0:
             valid_mask = conf_batch >= min_confidence
             points_batch = points_batch[valid_mask]
             colors_batch = colors_batch[valid_mask]
             conf_batch = conf_batch[valid_mask]
-        
+
         if len(conf_batch) > 0:
             print(f"DEBUG confidence: min={conf_batch.min():.4f}, max={conf_batch.max():.4f}")
-        
-        create_point_cloud_object("Points", points_batch, colors_batch, conf_batch, None, collection)
+
+        create_point_cloud_object("Points", points_batch, colors_batch, conf_batch, None, collection, scale=point_scale)
     
 def _frame_number_from_path(image_path, fallback_index):
     """Return a 1-indexed Blender frame number for an image.
@@ -1218,7 +1259,7 @@ def _keyframe_visibility(obj, frame_number):
                     kp.interpolation = 'CONSTANT'
 
 
-def create_cameras(predictions, collection=None, image_width=None, image_height=None, animate_sequence=False, global_indices=None):
+def create_cameras(predictions, collection=None, image_width=None, image_height=None, animate_sequence=False, global_indices=None, keep_individual_cameras=True, output_path=None, source_name=None):
     scene = bpy.context.scene
     if image_width is None or image_height is None:
         H, W = predictions['images'].shape[1:3]
@@ -1243,6 +1284,25 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
         target_collection = cameras_col
 
     T = np.diag([1.0, -1.0, -1.0, 1.0])
+    R = Matrix.Rotation(math.radians(-90), 4, 'X')
+
+    # When animating, create one camera that follows the trajectory via keyframes.
+    # Individual cameras are kept as static reference markers but are not animated.
+    anim_cam_obj = None
+    anim_cam_data = None
+    if animate_sequence:
+        # Always create a fresh camera so repeated runs don't mix keyframes.
+        # Blender will auto-rename (DA3_Camera, DA3_Camera.001, ...) if needed.
+        anim_cam_data = bpy.data.cameras.new(name="DA3_Camera")
+        anim_cam_data.sensor_width = 36.0
+        anim_cam_obj = bpy.data.objects.new(name="DA3_Camera", object_data=anim_cam_data)
+        if target_collection is not None:
+            target_collection.objects.link(anim_cam_obj)
+        else:
+            scene.collection.objects.link(anim_cam_obj)
+
+    all_intrinsic_records = []
+
     for i in range(num_cameras):
         # Name from image file if available
         image_path_i = None
@@ -1256,22 +1316,43 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
 
         cam_data = bpy.data.cameras.new(name=cam_name)
         K = predictions["intrinsic"][i]
-        f_x = K[0,0]
-        c_x = K[0,2]
-        c_y = K[1,2]
+        f_x = float(K[0, 0])
+        f_y = float(K[1, 1])
+        c_x = float(K[0, 2])
+        c_y = float(K[1, 2])
         sensor_width = 36.0
         cam_data.sensor_width = sensor_width
         cam_data.lens = (f_x / image_width) * sensor_width
         cam_data.shift_x = (c_x - image_width / 2.0) / image_width
         cam_data.shift_y = (c_y - image_height / 2.0) / image_height
+
+        # Store raw intrinsics as custom properties (visible in Properties > Camera > Custom Properties)
+        fov_h = math.degrees(2.0 * math.atan(image_width / (2.0 * f_x)))
+        fov_v = math.degrees(2.0 * math.atan(image_height / (2.0 * f_y)))
+        cam_data["fx"] = round(f_x, 4)
+        cam_data["fy"] = round(f_y, 4)
+        cam_data["cx"] = round(c_x, 4)
+        cam_data["cy"] = round(c_y, 4)
+        cam_data["fov_h_deg"] = round(fov_h, 2)
+        cam_data["fov_v_deg"] = round(fov_v, 2)
+
         cam_obj = bpy.data.objects.new(name=cam_name, object_data=cam_data)
 
-        if target_collection is not None:
-            target_collection.objects.link(cam_obj)
-        else:
-            scene.collection.objects.link(cam_obj)
-        
         ext = predictions["extrinsic"][i]
+
+        # Compute frame number (used for keyframing and intrinsic records)
+        if image_path_i:
+            frame_num = _frame_number_from_path(image_path_i, global_indices[i] if global_indices is not None else i)
+        else:
+            frame_num = (global_indices[i] + 1) if global_indices is not None else (i + 1)
+
+        all_intrinsic_records.append({
+            "frame": frame_num,
+            "name": cam_name,
+            "fx": f_x, "fy": f_y,
+            "cx": c_x, "cy": c_y,
+            "fov_h_deg": fov_h, "fov_v_deg": fov_v,
+        })
 
         # Debug print: filename + intrinsics/extrinsics per camera
         try:
@@ -1301,54 +1382,224 @@ def create_cameras(predictions, collection=None, image_width=None, image_height=
         E = np.vstack((ext, [0, 0, 0, 1]))
         E_inv = np.linalg.inv(E)
         M = np.dot(E_inv, T)
-        cam_obj.matrix_world = Matrix(M.tolist())
-        R = Matrix.Rotation(math.radians(-90), 4, 'X')
-        cam_obj.matrix_world = R @ cam_obj.matrix_world
+        cam_obj.matrix_world = R @ Matrix(M.tolist())
 
         if animate_sequence:
-            if image_path_i:
-                frame_num = _frame_number_from_path(image_path_i, global_indices[i] if global_indices is not None else i)
+            # Move the animated camera to this position and keyframe it.
+            anim_cam_obj.matrix_world = cam_obj.matrix_world.copy()
+            anim_cam_obj.keyframe_insert(data_path="location", frame=frame_num)
+            anim_cam_obj.keyframe_insert(data_path="rotation_euler", frame=frame_num)
+            anim_cam_data.lens = cam_data.lens
+            anim_cam_data.shift_x = cam_data.shift_x
+            anim_cam_data.shift_y = cam_data.shift_y
+            anim_cam_data.keyframe_insert(data_path="lens", frame=frame_num)
+            anim_cam_data.keyframe_insert(data_path="shift_x", frame=frame_num)
+            anim_cam_data.keyframe_insert(data_path="shift_y", frame=frame_num)
+
+        # Link individual camera to the scene, or discard it if not needed.
+        if not animate_sequence or keep_individual_cameras:
+            if target_collection is not None:
+                target_collection.objects.link(cam_obj)
             else:
-                frame_num = (global_indices[i] + 1) if global_indices is not None else (i + 1)
-            _keyframe_visibility(cam_obj, frame_num)
+                scene.collection.objects.link(cam_obj)
+        else:
+            bpy.data.objects.remove(cam_obj)
+            bpy.data.cameras.remove(cam_data)
+
+    # --- Consensus intrinsics (median across all frames) ---
+    # Robust approximation for fixed-camera sequences; also useful for moving cameras
+    # as a "typical" intrinsic when the model predictions vary slightly frame-to-frame.
+    if all_intrinsic_records:
+        fx_arr = np.array([r["fx"] for r in all_intrinsic_records])
+        fy_arr = np.array([r["fy"] for r in all_intrinsic_records])
+        cx_arr = np.array([r["cx"] for r in all_intrinsic_records])
+        cy_arr = np.array([r["cy"] for r in all_intrinsic_records])
+
+        med_fx = float(np.median(fx_arr))
+        med_fy = float(np.median(fy_arr))
+        med_cx = float(np.median(cx_arr))
+        med_cy = float(np.median(cy_arr))
+        std_fx = float(np.std(fx_arr))
+        std_fy = float(np.std(fy_arr))
+        med_fov_h = math.degrees(2.0 * math.atan(image_width / (2.0 * med_fx)))
+        med_fov_v = math.degrees(2.0 * math.atan(image_height / (2.0 * med_fy)))
+
+        # Store consensus on the animated camera data block so it's easy to find
+        if anim_cam_data is not None:
+            anim_cam_data["consensus_fx"] = round(med_fx, 4)
+            anim_cam_data["consensus_fy"] = round(med_fy, 4)
+            anim_cam_data["consensus_cx"] = round(med_cx, 4)
+            anim_cam_data["consensus_cy"] = round(med_cy, 4)
+            anim_cam_data["consensus_fov_h_deg"] = round(med_fov_h, 2)
+            anim_cam_data["consensus_fov_v_deg"] = round(med_fov_v, 2)
+            anim_cam_data["std_fx"] = round(std_fx, 4)
+            anim_cam_data["std_fy"] = round(std_fy, 4)
+
+        # Build a human-readable intrinsics report and save it as a Blender text block
+        lines = [
+            "DA3 Camera Intrinsics Report",
+            "=" * 60,
+            f"Frames : {len(all_intrinsic_records)}",
+            f"Image  : {image_width} x {image_height} px",
+            "",
+            "--- Consensus (median) — fixed-camera approximation ---",
+            f"  fx = {med_fx:.4f}  (std: {std_fx:.4f})",
+            f"  fy = {med_fy:.4f}  (std: {std_fy:.4f})",
+            f"  cx = {med_cx:.4f}",
+            f"  cy = {med_cy:.4f}",
+            f"  FOV horizontal = {med_fov_h:.2f} deg",
+            f"  FOV vertical   = {med_fov_v:.2f} deg",
+            "  K =",
+            f"    [ {med_fx:>10.4f}    0.0000    {med_cx:>10.4f} ]",
+            f"    [    0.0000  {med_fy:>10.4f}    {med_cy:>10.4f} ]",
+            f"    [    0.0000    0.0000       1.0000 ]",
+            "",
+            "--- Per-frame intrinsics ---",
+            f"  {'frame':>6}  {'name':<24}  {'fx':>10}  {'fy':>10}  {'cx':>8}  {'cy':>8}  {'fov_h°':>7}  {'fov_v°':>7}",
+            "  " + "-" * 96,
+        ]
+        for r in all_intrinsic_records:
+            lines.append(
+                f"  {r['frame']:>6}  {r['name']:<24}  {r['fx']:>10.4f}  {r['fy']:>10.4f}"
+                f"  {r['cx']:>8.4f}  {r['cy']:>8.4f}  {r['fov_h_deg']:>7.2f}  {r['fov_v_deg']:>7.2f}"
+            )
+        text_content = "\n".join(lines) + "\n"
+
+        txt_name = "DA3_Camera_Intrinsics"
+        txt = bpy.data.texts.get(txt_name)
+        if txt is None:
+            txt = bpy.data.texts.new(txt_name)
+        txt.clear()
+        txt.write(text_content)
+        print(f"[DA3] Intrinsics report written to Blender text block '{txt.name}' "
+              f"(consensus: fx={med_fx:.2f}, fy={med_fy:.2f}, fov_h={med_fov_h:.1f}°)")
+
+        # Write CSV + calib files alongside the input images for external use
+        if output_path:
+            try:
+                import csv
+                csv_path = os.path.join(output_path, "camera_intrinsics.csv")
+                with open(csv_path, "w", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=["frame", "name", "fx", "fy", "cx", "cy", "fov_h_deg", "fov_v_deg"])
+                    writer.writeheader()
+                    writer.writerows(all_intrinsic_records)
+                print(f"[DA3] Intrinsics CSV saved: {csv_path}")
+            except Exception as e:
+                print(f"[DA3] Warning: could not write intrinsics CSV: {e}")
+
+            # Derive a clean stem from source_name (strip extension if it's a video filename)
+            _stem = os.path.splitext(source_name)[0] if source_name else "calib"
+
+            # calib_{name}_da3.txt — consensus intrinsics at DA3's processed resolution
+            # (same coordinate space as the CSV / custom properties)
+            try:
+                calib_da3_path = os.path.join(output_path, f"calib_{_stem}_da3.txt")
+                with open(calib_da3_path, "w") as f:
+                    f.write(f"{med_fx:.6f} {med_fy:.6f} {med_cx:.6f} {med_cy:.6f}\n")
+                print(f"[DA3] {os.path.basename(calib_da3_path)} saved (processed res {image_width}x{image_height}): {calib_da3_path}")
+            except Exception as e:
+                print(f"[DA3] Warning: could not write calib_da3 file: {e}")
+
+            # calib_{name}.txt — consensus intrinsics scaled to original image resolution,
+            # ready to use directly with DROID-SLAM (--calib) and ViPE.
+            # Scaling: fx_orig = fx_da3 * (W_orig / W_da3), similarly for fy, cx, cy.
+            try:
+                orig_w, orig_h = image_width, image_height  # fallback = processed res
+                first_path = predictions.get("image_paths", [None])[0] if predictions.get("image_paths") else None
+                if first_path and os.path.isfile(first_path):
+                    _img = cv2.imread(first_path)
+                    if _img is not None:
+                        orig_h, orig_w = _img.shape[:2]
+                scale_x = orig_w / image_width
+                scale_y = orig_h / image_height
+                orig_fx = med_fx * scale_x
+                orig_fy = med_fy * scale_y
+                orig_cx = med_cx * scale_x
+                orig_cy = med_cy * scale_y
+                calib_path = os.path.join(output_path, f"calib_{_stem}.txt")
+                with open(calib_path, "w") as f:
+                    f.write(f"{orig_fx:.6f} {orig_fy:.6f} {orig_cx:.6f} {orig_cy:.6f}\n")
+                print(
+                    f"[DA3] {os.path.basename(calib_path)} saved (original res {orig_w}x{orig_h}, "
+                    f"scale {scale_x:.3f}x{scale_y:.3f}): {calib_path}"
+                )
+                # Also append the original-resolution values to the Blender text block
+                orig_fov_h = math.degrees(2.0 * math.atan(orig_w / (2.0 * orig_fx)))
+                orig_fov_v = math.degrees(2.0 * math.atan(orig_h / (2.0 * orig_fy)))
+                addendum = (
+                    f"\n--- {os.path.basename(calib_path)} (original resolution {orig_w}x{orig_h}) ---\n"
+                    f"  fx = {orig_fx:.4f}   fy = {orig_fy:.4f}\n"
+                    f"  cx = {orig_cx:.4f}   cy = {orig_cy:.4f}\n"
+                    f"  FOV horizontal = {orig_fov_h:.2f} deg\n"
+                    f"  FOV vertical   = {orig_fov_v:.2f} deg\n"
+                    f"  (scale factor: {scale_x:.4f} x, {scale_y:.4f} y)\n"
+                    f"  File: {calib_path}\n"
+                )
+                txt = bpy.data.texts.get(txt_name)
+                if txt is not None:
+                    txt.write(addendum)
+            except Exception as e:
+                print(f"[DA3] Warning: could not write calib.txt: {e}")
 
 def get_or_create_image_material(image_path):
-    name = os.path.basename(image_path)
-    mat = bpy.data.materials.get(name)
+    abs_path = os.path.abspath(image_path)
+
+    # Find image by filepath (not name) to avoid stale-cache bugs across runs
+    img = None
+    for existing in bpy.data.images:
+        try:
+            if os.path.abspath(bpy.path.abspath(existing.filepath)) == abs_path:
+                img = existing
+                break
+        except Exception:
+            pass
+    if img is None:
+        try:
+            img = bpy.data.images.load(image_path)
+            # Pack images from temp dirs so they survive temp cleanup
+            if img is not None and abs_path.startswith(tempfile.gettempdir()):
+                img.pack()
+        except Exception as e:
+            print(f"[DA3] Could not load image {image_path}: {e}")
+
+    # Validate cached material actually has the correct image; recreate if not
+    mat_name = os.path.basename(image_path)
+    mat = bpy.data.materials.get(mat_name)
+    if mat is not None and img is not None:
+        correct = (
+            mat.use_nodes and mat.node_tree is not None and
+            any(n.type == 'TEX_IMAGE' and n.image == img
+                for n in mat.node_tree.nodes)
+        )
+        if not correct:
+            mat = None  # force recreate
+
     if mat is None:
-        mat = bpy.data.materials.new(name=name)
+        mat = bpy.data.materials.new(name=mat_name)
         mat.use_nodes = True
         nodes = mat.node_tree.nodes
         links = mat.node_tree.links
         nodes.clear()
-        
+
         tex_coord = nodes.new('ShaderNodeTexCoord')
         tex_coord.location = (-800, 200)
-        
+
         tex_image = nodes.new('ShaderNodeTexImage')
         tex_image.location = (-500, 200)
-        try:
-            # Check if image is already loaded
-            img_name = os.path.basename(image_path)
-            img = bpy.data.images.get(img_name)
-            if img is None:
-                img = bpy.data.images.load(image_path)
+        if img is not None:
             tex_image.image = img
-        except Exception as e:
-            print(f"Could not load image {image_path}: {e}")
-            
+
         bsdf = nodes.new('ShaderNodeBsdfPrincipled')
         bsdf.location = (-200, 200)
         bsdf.inputs['Roughness'].default_value = 1.0
-        # Try to set specular to 0 to avoid shiny photos
         if 'Specular IOR Level' in bsdf.inputs:
             bsdf.inputs['Specular IOR Level'].default_value = 0.0
         elif 'Specular' in bsdf.inputs:
             bsdf.inputs['Specular'].default_value = 0.0
-        
+
         output = nodes.new('ShaderNodeOutputMaterial')
         output.location = (100, 200)
-        
+
         links.new(tex_coord.outputs['UV'], tex_image.inputs['Vector'])
         links.new(tex_image.outputs['Color'], bsdf.inputs['Base Color'])
         links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
@@ -1429,7 +1680,7 @@ def add_filter_mesh_modifier(obj, min_confidence):
         
     mod.node_group = group
 
-def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence=0.5, global_indices=None, animate_sequence=False):
+def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence=0.5, global_indices=None, per_frame_geometry=False):
     points = d["world_points_from_depth"] # [N, H, W, 3]
     images = d["images"] # [N, H, W, 3]
     conf = d["conf"] # [N, H, W]
@@ -1581,7 +1832,7 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                 
                 target_col.objects.link(obj)
 
-                if animate_sequence:
+                if per_frame_geometry:
                     if "image_paths" in d and i < len(d["image_paths"]):
                         frame_num = _frame_number_from_path(d["image_paths"][i], global_indices[i] if global_indices is not None else i)
                     else:
@@ -1681,7 +1932,7 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                     add_filter_mesh_modifier(obj, min_confidence)
                     
                 # Animation
-                if animate_sequence:
+                if per_frame_geometry:
                     if "image_paths" in d and i < len(d["image_paths"]):
                         frame_num = _frame_number_from_path(d["image_paths"][i], global_indices[i] if global_indices is not None else i)
                     else:
@@ -1755,7 +2006,7 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                 else:
                     bpy.context.collection.objects.link(obj)
 
-                if animate_sequence:
+                if per_frame_geometry:
                     if "image_paths" in d and i < len(d["image_paths"]):
                         frame_num = _frame_number_from_path(d["image_paths"][i], global_indices[i] if global_indices is not None else i)
                     else:
@@ -1774,6 +2025,12 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                     add_filter_mesh_modifier(obj, min_confidence)
 
     else:
+        # Create a Meshes sub-collection to avoid cluttering the batch collection directly.
+        meshes_col = None
+        if collection:
+            meshes_col = bpy.data.collections.new("Meshes")
+            collection.children.link(meshes_col)
+
         for i in range(N):
             # Prepare data for this image
             pts = points[i].reshape(-1, 3)
@@ -1781,15 +2038,15 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
             pts_transformed = pts.copy()
             pts_transformed[:, [0, 1, 2]] = pts[:, [0, 2, 1]]
             pts_transformed[:, 2] = -pts_transformed[:, 2]
-            
+
             cols = images[i].reshape(-1, 3)
             cols = np.hstack((cols, np.ones((cols.shape[0], 1)))) # RGBA
             confs = conf[i].reshape(-1)
-            
+
             motion_vals = None
             if 'motion' in d:
                 motion_vals = d['motion'][i].reshape(-1)
-            
+
             # Create Mesh
             if "image_paths" in d and i < len(d["image_paths"]):
                 base_name = os.path.splitext(os.path.basename(d["image_paths"][i]))[0]
@@ -1822,12 +2079,12 @@ def import_mesh_from_depth(d, collection=None, filter_edges=True, min_confidence
                 motion_attr.data.foreach_set("value", motion_vals)
             
             obj = bpy.data.objects.new(mesh_name, mesh)
-            if collection:
-                collection.objects.link(obj)
+            if meshes_col:
+                meshes_col.objects.link(obj)
             else:
                 bpy.context.collection.objects.link(obj)
 
-            if animate_sequence:
+            if per_frame_geometry:
                 if "image_paths" in d and i < len(d["image_paths"]):
                     frame_num = _frame_number_from_path(d["image_paths"][i], global_indices[i] if global_indices is not None else i)
                 else:
