@@ -408,6 +408,24 @@ def get_model(model_name, load_half=False):
     if model is None or current_model_name != model_name or current_model_load_half != load_half:
         from depth_anything_3.api import DepthAnything3
         if torch.cuda.is_available():
+            # Fix: Blender/VirtualGL may set CUDA_VISIBLE_DEVICES="" (empty string).
+            # is_available() uses _cuda_getDeviceCount() directly → returns 1 (True).
+            # device_count() uses NVML + CUDA_VISIBLE_DEVICES → empty string makes
+            # NVML return 0 (not -1), bypassing the _cuda_getDeviceCount() fallback,
+            # so device_count()=0 while the GPU is actually present and usable.
+            # Removing the empty var restores correct device enumeration.
+            _vis_dev = os.environ.get('CUDA_VISIBLE_DEVICES')
+            if _vis_dev is not None and not _vis_dev.strip():
+                print(f"[DA3] Fixing CUDA_VISIBLE_DEVICES (was '{_vis_dev}', resetting to unset)")
+                del os.environ['CUDA_VISIBLE_DEVICES']
+            torch.cuda.init()
+            # Switch to a fresh CUDA stream so DA3 gets a clean cuBLAS handle.
+            # YOLO(model_path) corrupts the current stream's cuBLAS handle even
+            # when YOLO runs on CPU (confirmed: 16x16 GEMM fails after YOLO load
+            # but before any YOLO inference).  cuBLAS handles are per-(device,
+            # stream) in PyTorch, so a new stream gives a fresh, uncorrupted one.
+            _da3_stream = torch.cuda.Stream(device=0)
+            torch.cuda.set_stream(_da3_stream)
             torch.cuda.reset_peak_memory_stats()
         display_VRAM_usage(f"before loading {model_name}")
         config_model_name = CONFIG_NAME_MAP.get(model_name, model_name)
@@ -445,7 +463,7 @@ def get_model(model_name, load_half=False):
         try:
             first_param = next(model.parameters())
             print(f"Model device: {first_param.device}, dtype: {first_param.dtype}")
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
                 print(f"CUDA device: {torch.cuda.get_device_name(0)}; reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB")
             dtype_counts = _summarize_model_dtypes(model)
             print("Model dtype summary (dtype, device -> numel):", dict(dtype_counts))
@@ -473,25 +491,20 @@ def unload_current_model():
             display_VRAM_usage("after unload")
 
 def run_segmentation(image_paths, conf_threshold=0.25, model_name="yolo11x-seg"):
+    import pickle
+    import textwrap
+
     print(f"Loading {model_name} model...")
     display_VRAM_usage("before loading YOLO")
-    try:
-        from ultralytics import YOLO
-    except ImportError:
-        print("Error: ultralytics not installed. Please install it to use segmentation.")
-        return None, None
 
-    # Use selected model
-    # model_name passed as argument
     model_path = get_any_model_path(f"{model_name}.pt")
-    
+
     if not os.path.exists(model_path):
         print(f"Downloading {model_name} to {model_path}...")
         url = _URLS.get(model_name, "")
         if not url:
             print(f"Error: No URL known for {model_name}. Please download {model_name}.pt manually to {os.path.dirname(model_path)}")
             return None, None
-            
         try:
             os.makedirs(os.path.dirname(model_path), exist_ok=True)
             torch.hub.download_url_to_file(url, model_path)
@@ -499,116 +512,184 @@ def run_segmentation(image_paths, conf_threshold=0.25, model_name="yolo11x-seg")
             print(f"Failed to download {model_name}: {e}")
             return None, None
 
-    # Load model from specific path
-    seg_model = YOLO(model_path) 
-    display_VRAM_usage("after loading YOLO", include_peak=True)
-    
-    print(f"Running segmentation on {len(image_paths)} images...")
-    
-    # Run tracking
-    # persist=True is important for video tracking
-    # stream=True returns a generator, good for memory
-    results = seg_model.track(source=image_paths, conf=conf_threshold, persist=True, stream=True, verbose=False)
-    
-    segmentation_data = []
-    
-    for i, r in enumerate(results):
-        # r is a Results object
-        # We need masks and track IDs
-        frame_data = {
-            "masks": [],
-            "ids": [],
-            "classes": [],
-            "orig_shape": r.orig_shape
-        }
-        
-        if r.masks is not None:
-            # masks.data is a torch tensor of masks [N, H, W]
-            masks = r.masks.data.cpu().numpy()
-            
-            # Crop masks to remove letterbox padding (YOLO pads to multiple of 32)
-            # This ensures aspect ratio matches original image before we resize later
-            h_orig, w_orig = r.orig_shape
-            if len(masks.shape) == 3:
-                _, h_mask, w_mask = masks.shape
-                
-                # Calculate scale factor that was used to fit image into mask
-                scale = min(w_mask / w_orig, h_mask / h_orig)
-                
-                # Compute expected dimensions of the valid image area in the mask
-                new_w = int(round(w_orig * scale))
-                new_h = int(round(h_orig * scale))
-                
-                # Compute start offsets (centering)
-                x_off = (w_mask - new_w) // 2
-                y_off = (h_mask - new_h) // 2
-                
-                # Crop
-                masks = masks[:, y_off : y_off + new_h, x_off : x_off + new_w]
-            
-            # Fix edge artifacts (sometimes edges are black)
-            if len(masks.shape) == 3:
-                for k in range(masks.shape[0]):
-                    m = masks[k]
-                    h_m, w_m = m.shape
-                    
-                    # Fix bottom edge
-                    if h_m >= 3:
-                        if np.max(m[-1, :]) == 0:
-                            if np.max(m[-2, :]) == 0:
-                                m[-2:, :] = m[-3, :]
-                            else:
-                                m[-1, :] = m[-2, :]
+    # Run YOLO in an isolated subprocess with CUDA hidden (CUDA_VISIBLE_DEVICES="").
+    # YOLO(model_path) corrupts the process-wide cuBLAS handle even when running on
+    # CPU, causing every subsequent F.linear in DA3 to fail with std::bad_alloc.
+    # A subprocess with no CUDA visibility cannot touch any CUDA state in the main
+    # process, so DA3's cuBLAS handle remains intact.
+    _WORKER = textwrap.dedent("""\
+        import os
+        import sys
+        import pickle
 
-                    # Fix top edge
-                    if h_m >= 3:
-                        if np.max(m[0, :]) == 0:
-                            if np.max(m[1, :]) == 0:
-                                m[:2, :] = m[2, :]
-                            else:
-                                m[0, :] = m[1, :]
+        args_path = sys.argv[1]
+        result_path = sys.argv[2]
 
-                    # Fix left edge
-                    if w_m >= 3:
-                        if np.max(m[:, 0]) == 0:
-                            if np.max(m[:, 1]) == 0:
-                                m[:, :2] = m[:, 2:3]
-                            else:
-                                m[:, 0] = m[:, 1]
+        with open(args_path, 'rb') as f:
+            args = pickle.load(f)
 
-            frame_data["masks"] = masks
-            
-            if r.boxes is not None and r.boxes.id is not None:
-                frame_data["ids"] = r.boxes.id.int().cpu().numpy()
-            else:
-                # If no tracking IDs (e.g. first frame or lost track), use -1 or generate new ones?
-                # If tracking is on, it should return IDs. If not, maybe just detection.
-                # But we requested track().
-                # If no ID, maybe it's a new object that wasn't tracked?
-                # Let's use -1 for untracked
-                if r.boxes is not None:
-                    frame_data["ids"] = np.full(len(r.boxes), -1, dtype=int)
-            
-            if r.boxes is not None:
-                frame_data["classes"] = r.boxes.cls.int().cpu().numpy()
-                
-        segmentation_data.append(frame_data)
-        
-        if i % 10 == 0:
-            print(f"Segmented {i+1}/{len(image_paths)} images")
+        # Prepend deps_public paths so ultralytics / numpy are found correctly.
+        for p in reversed(args['sys_path']):
+            if p not in sys.path:
+                sys.path.insert(0, p)
 
-    display_VRAM_usage("after YOLO inference", include_peak=True)
-    
-    # Get class names
-    class_names = seg_model.names
+        import numpy as np
+        from ultralytics import YOLO
 
-    # Cleanup
-    del seg_model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        display_VRAM_usage("after unloading YOLO")
-        
-    return segmentation_data, class_names
+        model_path = args['model_path']
+        image_paths = args['image_paths']
+        conf_threshold = args['conf_threshold']
+
+        seg_model = YOLO(model_path)
+        segmentation_data = []
+        for _imgsz in [640, 320]:
+            segmentation_data = []
+            try:
+                results = seg_model.track(
+                    source=image_paths, conf=conf_threshold,
+                    persist=True, stream=True, verbose=False,
+                    device='cpu', imgsz=_imgsz,
+                )
+                for i, r in enumerate(results):
+                    frame_data = {
+                        "masks": [],
+                        "ids": [],
+                        "classes": [],
+                        "orig_shape": r.orig_shape,
+                    }
+
+                    if r.masks is not None:
+                        masks = r.masks.data.cpu().numpy()
+
+                        h_orig, w_orig = r.orig_shape
+                        if len(masks.shape) == 3:
+                            _, h_mask, w_mask = masks.shape
+                            scale = min(w_mask / w_orig, h_mask / h_orig)
+                            new_w = int(round(w_orig * scale))
+                            new_h = int(round(h_orig * scale))
+                            x_off = (w_mask - new_w) // 2
+                            y_off = (h_mask - new_h) // 2
+                            masks = masks[:, y_off:y_off + new_h, x_off:x_off + new_w]
+
+                        if len(masks.shape) == 3:
+                            for k in range(masks.shape[0]):
+                                m = masks[k]
+                                h_m, w_m = m.shape
+                                if h_m >= 3:
+                                    if np.max(m[-1, :]) == 0:
+                                        if np.max(m[-2, :]) == 0:
+                                            m[-2:, :] = m[-3, :]
+                                        else:
+                                            m[-1, :] = m[-2, :]
+                                if h_m >= 3:
+                                    if np.max(m[0, :]) == 0:
+                                        if np.max(m[1, :]) == 0:
+                                            m[:2, :] = m[2, :]
+                                        else:
+                                            m[0, :] = m[1, :]
+                                if w_m >= 3:
+                                    if np.max(m[:, 0]) == 0:
+                                        if np.max(m[:, 1]) == 0:
+                                            m[:, :2] = m[:, 2:3]
+                                        else:
+                                            m[:, 0] = m[:, 1]
+
+                        frame_data["masks"] = masks
+
+                        if r.boxes is not None and r.boxes.id is not None:
+                            frame_data["ids"] = r.boxes.id.int().cpu().numpy()
+                        else:
+                            if r.boxes is not None:
+                                frame_data["ids"] = np.full(len(r.boxes), -1, dtype=int)
+
+                        if r.boxes is not None:
+                            frame_data["classes"] = r.boxes.cls.int().cpu().numpy()
+
+                    segmentation_data.append(frame_data)
+
+                    if i % 10 == 0:
+                        print(f"Segmented {i+1}/{len(image_paths)} images", flush=True)
+
+                break  # success
+
+            except Exception as e:
+                print(f"[DA3-worker] Segmentation error ({type(e).__name__}) at imgsz={_imgsz}: {e}", flush=True)
+                if 'bad_alloc' in str(e) or 'out of memory' in str(e).lower():
+                    if _imgsz > 320:
+                        print("[DA3-worker] Retrying with imgsz=320 ...", flush=True)
+                        continue
+                    print("[DA3-worker] Segmentation failed at all image sizes.", flush=True)
+                    segmentation_data = None
+                    break
+                import traceback
+                traceback.print_exc()
+                segmentation_data = None
+                break
+
+        class_names = seg_model.names
+        del seg_model
+
+        with open(result_path, 'wb') as f:
+            pickle.dump({"segmentation_data": segmentation_data, "class_names": class_names}, f)
+    """)
+
+    tmp_dir = tempfile.mkdtemp(prefix="da3_yolo_")
+    try:
+        script_path = os.path.join(tmp_dir, "yolo_worker.py")
+        args_path = os.path.join(tmp_dir, "args.pkl")
+        result_path = os.path.join(tmp_dir, "result.pkl")
+
+        with open(script_path, 'w') as f:
+            f.write(_WORKER)
+
+        with open(args_path, 'wb') as f:
+            pickle.dump({
+                'model_path': model_path,
+                'image_paths': image_paths,
+                'conf_threshold': conf_threshold,
+                'sys_path': sys.path,
+            }, f)
+
+        env = os.environ.copy()
+        env['CUDA_VISIBLE_DEVICES'] = ''
+
+        print(f"[DA3] Running YOLO in isolated subprocess (CUDA hidden)...")
+        proc = subprocess.run(
+            [sys.executable, script_path, args_path, result_path],
+            env=env,
+            timeout=600,
+        )
+
+        if proc.returncode != 0:
+            print(f"[DA3] YOLO subprocess failed (return code {proc.returncode})")
+            return None, None
+
+        if not os.path.exists(result_path):
+            print("[DA3] YOLO subprocess produced no output file.")
+            return None, None
+
+        with open(result_path, 'rb') as f:
+            result = pickle.load(f)
+
+        segmentation_data = result.get("segmentation_data")
+        class_names = result.get("class_names")
+
+        if segmentation_data is None:
+            return None, None
+
+        display_VRAM_usage("after YOLO subprocess")
+        return segmentation_data, class_names
+
+    except subprocess.TimeoutExpired:
+        print("[DA3] YOLO subprocess timed out (600 s).")
+        return None, None
+    except Exception as e:
+        print(f"[DA3] YOLO subprocess error: {e}")
+        import traceback
+        traceback.print_exc()
+        return None, None
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 class DownloadModelOperator(bpy.types.Operator):
     bl_idname = "da3.download_model"
@@ -838,7 +919,13 @@ class GeneratePointCloudOperator(bpy.types.Operator):
         self.detect_motion = getattr(context.scene, "da3_detect_motion", False)
         self.motion_threshold = getattr(context.scene, "da3_motion_threshold", 0.1)
         self.animate_sequence = getattr(context.scene, "da3_animate_sequence", False)
-        
+        self.keep_individual_cameras = getattr(context.scene, "da3_keep_individual_cameras", False)
+        self.per_frame_geometry = getattr(context.scene, "da3_per_frame_geometry", False)
+        self.point_scale = getattr(context.scene, "da3_point_scale", 1.0)
+        self.output_folder = getattr(context.scene, "da3_output_folder", "") or ""
+        self.start_frame = getattr(context.scene, "da3_start_frame", 0)
+        self.end_frame = getattr(context.scene, "da3_end_frame", -1)
+
         # Prime the model folder cache in the main thread
         get_configured_model_folder(context)
         
@@ -913,7 +1000,10 @@ class GeneratePointCloudOperator(bpy.types.Operator):
             "generate_mesh": self.generate_mesh,
             "filter_edges": self.filter_edges,
             "min_confidence": self.min_confidence,
-            "animate_sequence": self.animate_sequence
+            "animate_sequence": self.animate_sequence,
+            "keep_individual_cameras": self.keep_individual_cameras,
+            "per_frame_geometry": self.per_frame_geometry,
+            "point_scale": self.point_scale,
         })
 
     def _write_streaming_config(self, model_path, chunk_size, overlap, loop_chunk_size, output_dir, ref_view_strategy):
@@ -1119,7 +1209,8 @@ Loop:
                 if image_paths:
                     preds["image_paths"] = image_paths
 
-                create_cameras(preds, collection=_collection, image_width=image_width, image_height=image_height)
+                _src_name = os.path.basename(os.path.normpath(getattr(self, "input_folder", _output_dir) or _output_dir))
+                create_cameras(preds, collection=_collection, image_width=image_width, image_height=image_height, output_path=_output_dir, source_name=_src_name)
                 return True
 
             # Unified parity path: segmentation, mesh, or motion (non-chunk import)
@@ -1329,7 +1420,10 @@ Loop:
 
                                 # Add image paths for texturing
                                 from pathlib import Path
-                                image_list = sorted(list(Path(self.input_folder).glob("*.png")))
+                                image_list = sorted(
+                                    p for ext in ("*.png", "*.PNG", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG")
+                                    for p in Path(self.input_folder).glob(ext)
+                                )
                                 chunk_size = 10
                                 overlap = 5
                                 start_idx = idx * (chunk_size - overlap)
@@ -1425,12 +1519,23 @@ Loop:
         try:
             # Get image paths
             import glob
-            self.image_paths = sorted(glob.glob(os.path.join(self.input_folder, "*.[jJpP][pPnN][gG]")))
+            _img_exts = ("*.png", "*.PNG", "*.jpg", "*.JPG", "*.jpeg", "*.JPEG")
+            self.image_paths = sorted(
+                p for ext in _img_exts
+                for p in glob.glob(os.path.join(self.input_folder, ext))
+            )
             if not self.image_paths:
                 self.result_queue.put({"type": "ERROR", "message": "No images found in the input folder."})
                 return
             
             print(f"Total images: {len(self.image_paths)}")
+
+            # Apply start/end frame range
+            start = self.start_frame
+            end = self.end_frame if self.end_frame >= 0 else len(self.image_paths)
+            self.image_paths = self.image_paths[start:end + 1 if self.end_frame >= 0 else end]
+            if start > 0 or self.end_frame >= 0:
+                print(f"After frame range [{start}:{self.end_frame}]: {len(self.image_paths)} images")
 
             # Apply frame stride subsampling
             frame_stride = getattr(context.scene, "da3_frame_stride", 1)
@@ -1958,7 +2063,10 @@ Loop:
             filter_edges = msg["filter_edges"]
             min_confidence = msg["min_confidence"]
             animate_sequence = msg.get("animate_sequence", False)
-            
+            keep_individual_cameras = msg.get("keep_individual_cameras", False)
+            per_frame_geometry = msg.get("per_frame_geometry", False)
+            point_scale = msg.get("point_scale", 1.0)
+
             parent_col = self.parent_col
             if not parent_col:
                 parent_col = bpy.data.collections.new(folder_name)
@@ -1969,11 +2077,28 @@ Loop:
             parent_col.children.link(batch_col)
             
             if generate_mesh:
-                import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices, animate_sequence=animate_sequence)
+                import_mesh_from_depth(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices, per_frame_geometry=per_frame_geometry)
             else:
-                import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices)
+                import_point_cloud(combined_predictions, collection=batch_col, filter_edges=filter_edges, min_confidence=min_confidence, global_indices=batch_indices, per_frame_geometry=per_frame_geometry, point_scale=point_scale)
 
-            create_cameras(combined_predictions, collection=batch_col, animate_sequence=animate_sequence, global_indices=batch_indices)
+            _out = getattr(self, "output_folder", "") or getattr(self, "input_folder", None)
+            # Derive a meaningful source name for calib file naming.
+            # For video inputs _input_display_name is the video stem (always good).
+            # For image folders, folder_name is the direct parent dir of the images —
+            # when that's a generic staging name ("output", "frames", etc.) climb up
+            # one level to get the shot/sequence name instead.
+            _GENERIC_DIRS = {"output", "images", "frames", "input", "img", "imgs",
+                             "photos", "raw", "renders", "render", "data", "src", "export"}
+            _display = getattr(self, "_input_display_name", None)
+            if _display:
+                _source_name = _display
+            elif folder_name.lower() in _GENERIC_DIRS:
+                _parent = os.path.basename(os.path.dirname(
+                    os.path.normpath(getattr(self, "input_folder", "") or "")))
+                _source_name = _parent or folder_name
+            else:
+                _source_name = folder_name
+            create_cameras(combined_predictions, collection=batch_col, animate_sequence=animate_sequence, global_indices=batch_indices, keep_individual_cameras=keep_individual_cameras, output_path=_out or None, source_name=_source_name)
         except Exception as e:
             # end_progress_timer()
             import traceback

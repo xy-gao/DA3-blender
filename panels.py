@@ -58,6 +58,7 @@ class DA3Panel(bpy.types.Panel):
 
         # Input folder stays prominent
         layout.prop(scene, "da3_input_folder", text="Input Folder / Video")
+        layout.prop(scene, "da3_output_folder", text="Output Folder")
 
         # --- Resolution (non-collapsible) ---
         res_box = layout.box()
@@ -83,6 +84,9 @@ class DA3Panel(bpy.types.Panel):
                 batch_box.prop(scene, "da3_batch_size", text="Batch Size")
             if scene.da3_batch_mode != "skip_frames":
                 batch_box.prop(scene, "da3_frame_stride", text="Frame Stride")
+            row = batch_box.row(align=True)
+            row.prop(scene, "da3_start_frame", text="Start Frame")
+            row.prop(scene, "da3_end_frame", text="End Frame")
             batch_box.prop(scene, "da3_ref_view_strategy", text="Ref View Strategy")
 
             if scene.da3_batch_mode == "da3_streaming":
@@ -137,8 +141,14 @@ class DA3Panel(bpy.types.Panel):
                 sm_box.separator()
 
         layout.prop(scene, "da3_generate_mesh", text="Generate Meshes")
-        if scene.da3_generate_mesh:
-            layout.prop(scene, "da3_animate_sequence", text="Animate Sequence")
+        layout.prop(scene, "da3_animate_sequence", text="Animate Sequence")
+        if scene.da3_animate_sequence:
+            row = layout.row()
+            row.separator(factor=2.0)
+            row.prop(scene, "da3_keep_individual_cameras", text="Keep Individual Cameras")
+        layout.prop(scene, "da3_per_frame_geometry", text="Per-frame Geometry")
+        if not scene.da3_generate_mesh:
+            layout.prop(scene, "da3_point_scale", text="Point Scale")
         layout.prop(scene, "da3_output_debug_images", text="Output Debug Images")
         row = layout.row()
         row.operator("da3.generate_point_cloud")

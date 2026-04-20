@@ -72,6 +72,89 @@ class MoveModelsOperator(bpy.types.Operator):
         self.report({'INFO'}, f"Moved {moved_count} files to {target_dir}")
         return {'FINISHED'}
 
+def _create_torch_preload_script():
+    """Write a Blender startup script that pre-loads CUDA torch before any addon runs.
+
+    Placed in {user_config}/scripts/startup/ so it executes before addons.
+    Uses a relative path (../addons/DA3-blender-main/deps_public) so it works
+    regardless of where Blender's user config lives.
+    """
+    import bpy
+    user_path = Path(bpy.utils.resource_path('USER'))
+    startup_dir = user_path / 'scripts' / 'startup'
+    startup_dir.mkdir(parents=True, exist_ok=True)
+
+    script_path = startup_dir / 'da3_torch_preload.py'
+    script_content = (
+        '"""DA3 Addon - CUDA torch preloader (auto-generated).\n'
+        'Ensures deps_public CUDA torch is loaded before any addon\n'
+        '(including ones that do "import torch" at module level, e.g. GenMM)\n'
+        'can import Blenders bundled CPU-only torch.\n'
+        '"""\n'
+        'import ctypes\n'
+        'import glob as _glob\n'
+        'import sys\n'
+        'from pathlib import Path\n'
+        '\n'
+        '# deps_public is at {user}/scripts/addons/DA3-blender-main/deps_public\n'
+        '_da3_deps = Path(__file__).parent.parent / "addons" / "DA3-blender-main" / "deps_public"\n'
+        'if (_da3_deps / "torch").exists():\n'
+        '    _deps_str = str(_da3_deps)\n'
+        '    if _deps_str not in sys.path:\n'
+        '        sys.path.insert(0, _deps_str)\n'
+        '\n'
+        '    # cuDNN 9.x loads component libs lazily by name only. Pre-load every\n'
+        '    # .so.N file from the pip-installed nvidia packages with RTLD_GLOBAL so\n'
+        '    # those dlopen() calls succeed at inference time.\n'
+        '    _nvidia_dir = str(_da3_deps / "nvidia")\n'
+        '    for _lib_path in sorted(_glob.glob(f"{_nvidia_dir}/*/lib/*.so.*")):\n'
+        '        _base = _lib_path.rsplit(".so.", 1)[-1]\n'
+        '        _parts = _base.split(".")\n'
+        '        if len(_parts) <= 2 and all(p.isdigit() for p in _parts):\n'
+        '            if "nvblas" in _lib_path:\n'
+        '                continue\n'
+        '            try:\n'
+        '                ctypes.CDLL(_lib_path, ctypes.RTLD_GLOBAL)\n'
+        '            except Exception:\n'
+        '                pass\n'
+        '\n'
+        '    # Evict any Blender-bundled torch already in sys.modules\n'
+        '    _to_evict = [n for n in list(sys.modules)\n'
+        '                 if n == "torch" or n.startswith("torch.") or\n'
+        '                    n == "torchvision" or n.startswith("torchvision.")]\n'
+        '    for _m in _to_evict:\n'
+        '        sys.modules.pop(_m, None)\n'
+        '    # Pre-load CUDA torch so it wins the sys.modules race\n'
+        '    try:\n'
+        '        import torch as _da3_torch\n'
+        '        print(f"[DA3] Pre-loaded torch {_da3_torch.__version__} from deps_public "\n'
+        '              f"(CUDA: {_da3_torch.cuda.is_available()})")\n'
+        '        del _da3_torch\n'
+        '    except Exception as _e:\n'
+        '        print(f"[DA3] Warning: could not pre-load torch from deps_public: {_e}")\n'
+        '\n'
+        '    # Some torch CUDA extension libs (e.g. libtorch_cuda_linalg.so) are loaded\n'
+        '    # lazily by name only when first used (e.g. torch.inverse on a CUDA tensor).\n'
+        '    # Pre-loading them with RTLD_GLOBAL after torch is imported ensures dlopen\n'
+        '    # can find them without needing them on LD_LIBRARY_PATH.\n'
+        '    _torch_lib_dir = str(_da3_deps / "torch" / "lib")\n'
+        '    for _lib_name in ("libtorch_cuda_linalg.so",):\n'
+        '        _lib_path = f"{_torch_lib_dir}/{_lib_name}"\n'
+        '        try:\n'
+        '            ctypes.CDLL(_lib_path, ctypes.RTLD_GLOBAL)\n'
+        '            print(f"[DA3] Pre-loaded {_lib_name}")\n'
+        '        except Exception as _e:\n'
+        '            print(f"[DA3] Warning: could not pre-load {_lib_name}: {_e}")\n'
+        '\n'
+        '\n'
+        'def register():\n'
+        '    pass\n'
+    )
+    with open(script_path, 'w') as f:
+        f.write(script_content)
+    print(f'[DA3] Created startup preload script: {script_path}')
+
+
 class DA3InstallDepsOperator(bpy.types.Operator):
     bl_idname = "da3.install_dependencies"
     bl_label = "Install Dependencies"
@@ -80,8 +163,11 @@ class DA3InstallDepsOperator(bpy.types.Operator):
 
     def execute(self, context):
         try:
-            Dependencies.install()
-            self.report({'INFO'}, "Dependencies installed successfully. Please re-enable the addon.")
+            if Dependencies.install():
+                _create_torch_preload_script()
+                self.report({'INFO'}, "Dependencies installed successfully. Please restart Blender.")
+            else:
+                self.report({'ERROR'}, "Failed to install dependencies. Check Blender System Console.")
         except Exception as e:
             self.report({'ERROR'}, f"Failed to install dependencies: {e}")
         return {'FINISHED'}
@@ -149,23 +235,29 @@ def register_classes():
     bpy.types.Scene.da3_ui_model_open = bpy.props.BoolProperty(
         name="Model",
         description="Show/hide model options",
-        default=True,
+        default=False,
     )
     bpy.types.Scene.da3_ui_batch_open = bpy.props.BoolProperty(
         name="Batch",
         description="Show/hide batch options",
-        default=True,
+        default=False,
     )
     bpy.types.Scene.da3_ui_seg_motion_open = bpy.props.BoolProperty(
         name="Segmentation & Motion",
         description="Show/hide segmentation and motion options",
-        default=True,
+        default=False,
     )
 
     bpy.types.Scene.da3_input_folder = bpy.props.StringProperty(
         name="Input Folder / Video",
         description="Folder of images (JPG/PNG) or a video file (mp4, mov, avi, …)",
         subtype='FILE_PATH',
+    )
+    bpy.types.Scene.da3_output_folder = bpy.props.StringProperty(
+        name="Output Folder",
+        description="Folder to save generated data (camera intrinsics CSV, etc.). Leave empty to skip saving.",
+        subtype='DIR_PATH',
+        default="",
     )
     bpy.types.Scene.da3_streaming_output = bpy.props.StringProperty(
         name="Output",
@@ -239,6 +331,18 @@ def register_classes():
         description="Number of images to process in a single batch",
         default=10,
         min=1
+    )
+    bpy.types.Scene.da3_start_frame = bpy.props.IntProperty(
+        name="Start Frame",
+        description="Index of the first frame to process (0 = first image in folder)",
+        default=0,
+        min=0,
+    )
+    bpy.types.Scene.da3_end_frame = bpy.props.IntProperty(
+        name="End Frame",
+        description="Index of the last frame to process (inclusive). -1 means process until the last image.",
+        default=-1,
+        min=-1,
     )
     bpy.types.Scene.da3_frame_stride = bpy.props.IntProperty(
         name="Frame Stride",
@@ -322,7 +426,7 @@ def register_classes():
         ],
         name="Batch Mode",
         description="How to select images for processing",
-        default="skip_frames"
+        default="ignore_batch_size"
     )
     bpy.types.Scene.da3_filter_edges = bpy.props.BoolProperty(
         name="Filter Edges",
@@ -350,6 +454,23 @@ def register_classes():
         name="Animate Sequence",
         description="Keyframe each camera and mesh to be visible only on its corresponding Blender timeline frame",
         default=False,
+    )
+    bpy.types.Scene.da3_keep_individual_cameras = bpy.props.BoolProperty(
+        name="Keep Individual Cameras",
+        description="Also create one static camera object per frame as viewport reference markers (in addition to the animated DA3_Camera)",
+        default=False,
+    )
+    bpy.types.Scene.da3_per_frame_geometry = bpy.props.BoolProperty(
+        name="Per-frame Geometry",
+        description="Show one mesh/point-cloud per frame (appears and disappears with the timeline). Off = all frames combined into one static object",
+        default=False,
+    )
+    bpy.types.Scene.da3_point_scale = bpy.props.FloatProperty(
+        name="Point Scale",
+        description="Size multiplier for point cloud dots (radius = scale × 0.002 scene units)",
+        default=1.0,
+        min=0.01,
+        max=100.0,
     )
     bpy.types.Scene.da3_detect_motion = bpy.props.BoolProperty(
         name="Detect Motion",
@@ -413,6 +534,7 @@ def unregister_classes():
     del bpy.types.Scene.da3_ui_batch_open
     del bpy.types.Scene.da3_ui_seg_motion_open
     del bpy.types.Scene.da3_input_folder
+    del bpy.types.Scene.da3_output_folder
     del bpy.types.Scene.da3_streaming_output
     del bpy.types.Scene.da3_streaming_advanced_open
     del bpy.types.Scene.da3_model_name
@@ -423,6 +545,8 @@ def unregister_classes():
     del bpy.types.Scene.da3_load_half_precision
     del bpy.types.Scene.da3_use_ray_pose
     del bpy.types.Scene.da3_batch_size
+    del bpy.types.Scene.da3_start_frame
+    del bpy.types.Scene.da3_end_frame
     del bpy.types.Scene.da3_frame_stride
     del bpy.types.Scene.da3_ref_view_strategy
     del bpy.types.Scene.da3_streaming_loop_enable
@@ -438,6 +562,9 @@ def unregister_classes():
     del bpy.types.Scene.da3_output_debug_images
     del bpy.types.Scene.da3_generate_mesh
     del bpy.types.Scene.da3_animate_sequence
+    del bpy.types.Scene.da3_keep_individual_cameras
+    del bpy.types.Scene.da3_per_frame_geometry
+    del bpy.types.Scene.da3_point_scale
     del bpy.types.Scene.da3_detect_motion
     del bpy.types.Scene.da3_motion_threshold
     del bpy.types.Scene.da3_use_segmentation

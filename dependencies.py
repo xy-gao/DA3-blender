@@ -19,6 +19,38 @@ deps_path_da3 = add_on_path / 'deps_da3'
 sys.path.insert(0, os.fspath(deps_path))
 sys.path.insert(0, os.fspath(deps_path_da3))
 sys.path.insert(0, os.fspath(DA3_DIR))
+
+# Blender 4.4+ ships its own torch (CPU-only) in its bundled site-packages.
+# Other addons (e.g. GenMM) import that CPU torch at load time, which would
+# prevent our CUDA-enabled torch from loading due to C-extension ABI conflicts.
+# Strategy: the Blender startup script da3_torch_preload.py (in scripts/startup/)
+# pre-loads deps_public's CUDA torch before any addon runs.  Here we just verify
+# that the correct torch is already loaded.  If not (e.g. startup script was not
+# present), we attempt eviction and re-load as a fallback — but only if the
+# currently-loaded torch is NOT already from deps_public (evicting an already-
+# initialized torch._C causes "function already has a docstring" errors).
+_deps_public_str = os.fspath(deps_path)
+if (deps_path / 'torch').exists():
+    _existing_torch = sys.modules.get('torch')
+    _already_correct = (
+        _existing_torch is not None and
+        _deps_public_str in (getattr(_existing_torch, '__file__', '') or '')
+    )
+    if not _already_correct:
+        # Evict ALL torch/torchvision (wrong version or not loaded yet)
+        _to_evict = [n for n in list(sys.modules)
+                     if n == 'torch' or n.startswith('torch.') or
+                        n == 'torchvision' or n.startswith('torchvision.')]
+        for _mod_name in _to_evict:
+            sys.modules.pop(_mod_name, None)
+        # Pre-load deps_public's torch
+        try:
+            import torch as _da3_torch  # noqa: F401
+            del _da3_torch
+        except Exception as _e:
+            print(f'[DA3] Warning: could not pre-load torch from deps_public: {_e}')
+    del _existing_torch, _already_correct
+
 OPENCV_PINNED = "opencv-python==4.11.0.86"
 
 
