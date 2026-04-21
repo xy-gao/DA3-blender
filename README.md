@@ -8,6 +8,8 @@ This blender addon is based on [Depth-Anything-3](https://github.com/ByteDance-S
 ## Latest Update
 https://github.com/xy-gao/DA3-blender/pull/24#issue-4284491989
 
+https://github.com/user-attachments/assets/f7fcffb5-86d9-4698-aed3-2a72e5d8d2ca
+
 ## Usage
 1. Download Depth-Anything-3 model from operation panel (press N to toggle Sidebar, and click DA3 tab).
 2. select an image folder.
